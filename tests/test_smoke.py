@@ -23,11 +23,25 @@ def test_status(client: TestClient) -> None:
     data = r.json()
     assert "rag_chunks" in data
     assert data.get("llm_mode") in ("disabled", "openai")
+    arch = data.get("archive") or {}
+    assert "notion_configured" in arch
+    assert arch.get("mode") in ("obsidian", "notion", "download")
 
 def test_static_ui_served(client: TestClient) -> None:
     r = client.get("/static/index.html")
     assert r.status_code == 200
-    assert "Second Brain / Arhivist" in r.text
+    assert "Arhivist" in r.text
+    assert "Second Brain" in r.text
+    assert "/static/css/app.css" in r.text
+    assert "/static/js/app.js" in r.text
+    assert "wizardCardResult" in r.text
+    assert "wizardPipelineWrap" in r.text
+    assert "/drive/wizard/auto-place" in r.text
+
+
+def test_static_ui_assets(client: TestClient) -> None:
+    assert client.get("/static/css/app.css").status_code == 200
+    assert client.get("/static/js/app.js").status_code == 200
 
 
 def test_search_requires_q(client: TestClient) -> None:
