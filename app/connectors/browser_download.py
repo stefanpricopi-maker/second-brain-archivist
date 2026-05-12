@@ -6,6 +6,7 @@ import uuid
 from pathlib import Path
 
 from app.connectors.base import ArchiveResult
+from app.path_security import assert_under_base, sanitize_subdir
 
 
 def _safe_segment(name: str) -> str:
@@ -28,8 +29,17 @@ class BrowserDownloadSink:
         body_markdown: str,
         subdirectory: str | None = None,
     ) -> ArchiveResult:
-        sub = (subdirectory or "").strip("/").replace("..", "")
-        folder = self.exports_dir / sub if sub else self.exports_dir
+        sub = sanitize_subdir(subdirectory or "")
+        folder = (self.exports_dir / sub).resolve() if sub else self.exports_dir.resolve()
+        try:
+            assert_under_base(base=self.exports_dir, target=folder)
+        except ValueError:
+            return ArchiveResult(
+                ok=False,
+                destination="download",
+                path_or_url=None,
+                detail="Subdirector invalid (traversal respins).",
+            )
         folder.mkdir(parents=True, exist_ok=True)
 
         stamp = time.strftime("%Y%m%d-%H%M%S")
