@@ -120,6 +120,15 @@ def health() -> dict[str, str]:
     return {"status": "ok", "service": "second-brain-archivist"}
 
 
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon() -> FileResponse:
+    """Evită 404 în consola browserului la încărcarea paginii."""
+    path = STATIC_DIR / "favicon.ico"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="favicon missing")
+    return FileResponse(str(path), media_type="image/vnd.microsoft.icon", filename="favicon.ico")
+
+
 @app.get("/status", tags=["meta"])
 def status() -> dict[str, Any]:
     notion_sink = load_notion_sink_from_env()

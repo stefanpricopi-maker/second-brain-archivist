@@ -11,6 +11,12 @@ def client() -> TestClient:
     return TestClient(app)
 
 
+def test_favicon(client: TestClient) -> None:
+    r = client.get("/favicon.ico")
+    assert r.status_code == 200
+    assert r.headers.get("content-type", "").startswith("image/")
+
+
 def test_health(client: TestClient) -> None:
     r = client.get("/health")
     assert r.status_code == 200
@@ -34,6 +40,7 @@ def test_static_ui_served(client: TestClient) -> None:
     assert "Second Brain" in r.text
     assert "/static/css/app.css" in r.text
     assert "/static/js/app.js" in r.text
+    assert 'href="/favicon.ico"' in r.text
     assert "wizardCardResult" in r.text
     assert "wizardPipelineWrap" in r.text
     assert "/drive/wizard/auto-place" in r.text
