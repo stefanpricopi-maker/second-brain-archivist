@@ -3,317 +3,84 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Second Brain / Arhivist</title>
-    <style>
-      :root {
-        --bg: #0b1220;
-        --card: rgba(255, 255, 255, 0.06);
-        --border: rgba(255, 255, 255, 0.12);
-        --text: rgba(255, 255, 255, 0.92);
-        --muted: rgba(255, 255, 255, 0.68);
-        --accent: #60a5fa;
-        --ok: #34d399;
-        --bad: #fb7185;
-      }
-      @media (prefers-color-scheme: light) {
-        :root {
-          --bg: #f7f7fb;
-          --card: #ffffff;
-          --border: rgba(0, 0, 0, 0.1);
-          --text: rgba(0, 0, 0, 0.9);
-          --muted: rgba(0, 0, 0, 0.62);
-          --accent: #2563eb;
-          --ok: #059669;
-          --bad: #e11d48;
-        }
-      }
-      body {
-        margin: 0;
-        background: radial-gradient(1200px 700px at 20% 0%, rgba(96, 165, 250, 0.22), transparent 50%),
-          radial-gradient(900px 600px at 100% 10%, rgba(52, 211, 153, 0.16), transparent 50%), var(--bg);
-        color: var(--text);
-        font: 14px/1.4 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji",
-          "Segoe UI Emoji";
-      }
-      .wrap {
-        max-width: 980px;
-        margin: 0 auto;
-        padding: 18px 16px 48px;
-      }
-      header {
-        display: flex;
-        justify-content: space-between;
-        align-items: baseline;
-        gap: 16px;
-        margin: 6px 0 14px;
-      }
-      h1 {
-        margin: 0;
-        font-size: 22px;
-        letter-spacing: 0.2px;
-      }
-      .subtitle {
-        margin-top: 6px;
-        color: var(--muted);
-        max-width: 760px;
-      }
-      .pill {
-        display: inline-flex;
-        align-items: center;
-        gap: 10px;
-        padding: 10px 12px;
-        border: 1px solid var(--border);
-        background: var(--card);
-        border-radius: 14px;
-        color: var(--muted);
-        font-size: 12px;
-      }
-      .pill code {
-        color: var(--text);
-        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-      }
-      .grid {
-        display: grid;
-        grid-template-columns: 1fr;
-        gap: 12px;
-      }
-      .card {
-        border: 1px solid var(--border);
-        background: var(--card);
-        border-radius: 14px;
-        padding: 14px;
-      }
-      .row {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 10px;
-        align-items: center;
-      }
-      label {
-        font-weight: 600;
-      }
-      input[type="text"],
-      textarea {
-        width: 100%;
-        box-sizing: border-box;
-        border: 1px solid var(--border);
-        background: rgba(0, 0, 0, 0.12);
-        color: var(--text);
-        border-radius: 12px;
-        padding: 10px 12px;
-        outline: none;
-      }
-      @media (prefers-color-scheme: light) {
-        input[type="text"],
-        textarea {
-          background: rgba(255, 255, 255, 0.9);
-        }
-      }
-      textarea {
-        min-height: 110px;
-        resize: vertical;
-      }
-      button {
-        border: 1px solid var(--border);
-        background: rgba(255, 255, 255, 0.08);
-        color: var(--text);
-        border-radius: 12px;
-        padding: 10px 12px;
-        cursor: pointer;
-      }
-      button.primary {
-        background: rgba(96, 165, 250, 0.22);
-        border-color: rgba(96, 165, 250, 0.38);
-      }
-      button:disabled {
-        opacity: 0.55;
-        cursor: not-allowed;
-      }
-      .status {
-        margin-top: 10px;
-        color: var(--muted);
-      }
-      .status.ok {
-        color: var(--ok);
-      }
-      .status.bad {
-        color: var(--bad);
-      }
-      pre {
-        margin: 10px 0 0;
-        white-space: pre-wrap;
-        word-break: break-word;
-        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-        color: rgba(255, 255, 255, 0.88);
-      }
-      @media (prefers-color-scheme: light) {
-        pre {
-          color: rgba(0, 0, 0, 0.86);
-        }
-      }
-      .hint {
-        color: var(--muted);
-        font-size: 12px;
-      }
-      .drive-row {
-        margin-top: 10px;
-        padding: 10px;
-        border: 1px solid var(--border);
-        border-radius: 12px;
-        display: flex;
-        flex-wrap: wrap;
-        align-items: center;
-        gap: 10px;
-      }
-      .drive-row label {
-        font-weight: 500;
-        flex: 1 1 200px;
-        display: flex;
-        align-items: center;
-        gap: 8px;
-      }
-      .drive-row select {
-        min-width: 200px;
-        flex: 1 1 180px;
-        border: 1px solid var(--border);
-        background: rgba(0, 0, 0, 0.12);
-        color: var(--text);
-        border-radius: 10px;
-        padding: 8px 10px;
-      }
-      @media (prefers-color-scheme: light) {
-        .drive-row select {
-          background: rgba(255, 255, 255, 0.9);
-        }
-      }
-      .tag {
-        font-size: 11px;
-        padding: 2px 8px;
-        border-radius: 999px;
-        border: 1px solid var(--border);
-        color: var(--muted);
-      }
-      input[type="number"]#searchK {
-        width: 4.5rem;
-        border: 1px solid var(--border);
-        background: rgba(0, 0, 0, 0.12);
-        color: var(--text);
-        border-radius: 12px;
-        padding: 10px 12px;
-      }
-      @media (prefers-color-scheme: light) {
-        input[type="number"]#searchK {
-          background: rgba(255, 255, 255, 0.9);
-        }
-      }
-      .hit {
-        margin-top: 10px;
-        padding: 10px;
-        border-left: 3px solid var(--accent);
-        background: rgba(0, 0, 0, 0.08);
-        border-radius: 0 10px 10px 0;
-      }
-      @media (prefers-color-scheme: light) {
-        .hit {
-          background: rgba(0, 0, 0, 0.04);
-        }
-      }
-      .hit-meta {
-        font-size: 12px;
-        color: var(--muted);
-        margin-bottom: 6px;
-      }
-      .hit-text {
-        font-size: 13px;
-        line-height: 1.45;
-      }
-      .archive-link {
-        margin-top: 10px;
-        display: flex;
-        flex-wrap: wrap;
-        gap: 10px;
-        align-items: center;
-      }
-      .archive-link a {
-        color: var(--accent);
-        font-weight: 600;
-      }
-    </style>
+    <title>Arhivist — Second Brain</title>
+    <link rel="stylesheet" href="/static/css/app.css" />
   </head>
   <body>
-    <div class="wrap">
-      <header>
-        <div>
-          <h1>Second Brain / Arhivist</h1>
-          <div class="subtitle">
-            Încarcă documente → index local (RAG) → pune întrebări (text sau voce) → răspuns (text + opțional vocal).
-          </div>
-        </div>
-        <div class="pill">
-          <span>API</span>
-          <code id="apiBase"></code>
-        </div>
-      </header>
+    <header class="topbar">
+      <div class="brand">
+        <strong>Arhivist</strong>
+        <span>Second Brain — bibliotecă locală &amp; RAG</span>
+      </div>
+      <div class="topbar-actions">
+        <code id="apiBase" title="Baza API"></code>
+        <a href="/docs" target="_blank" rel="noopener">API docs</a>
+      </div>
+    </header>
 
-      <div class="grid">
+    <div class="layout">
+      <nav class="tabs" role="tablist" aria-label="Secțiuni">
+        <button type="button" role="tab" id="tab-index" aria-selected="true" aria-controls="panel-index">Index</button>
+        <button type="button" role="tab" id="tab-search" aria-selected="false" aria-controls="panel-search">Căutare</button>
+        <button type="button" role="tab" id="tab-chat" aria-selected="false" aria-controls="panel-chat">Chat</button>
+        <button type="button" role="tab" id="tab-archive" aria-selected="false" aria-controls="panel-archive">Arhivă</button>
+        <button type="button" role="tab" id="tab-drive" aria-selected="false" aria-controls="panel-drive">Drive</button>
+        <button type="button" role="tab" id="tab-service" aria-selected="false" aria-controls="panel-service">Serviciu</button>
+      </nav>
+
+      <div id="panel-index" class="panel active" role="tabpanel" aria-labelledby="tab-index">
         <div class="card">
-          <div class="row" style="justify-content: space-between">
-            <label>1) Încarcă documente și indexează</label>
-            <span class="hint">Acceptă: .pdf, .txt, .md, .docx (OCR pentru PDF scanat: în lucru)</span>
-          </div>
-          <div style="height: 10px"></div>
+          <h2>Indexare documente</h2>
+          <p class="lead">PDF, EPUB, TXT, MD, DOCX — stocate local, fragmente în Chroma.</p>
           <input id="fileInput" type="file" multiple />
-          <div style="height: 10px"></div>
+          <div style="height: 12px"></div>
           <div class="row">
             <button class="primary" id="btnIngest">Indexează fișierele</button>
-            <button id="btnStatus">Stare</button>
+            <button type="button" id="btnStatus">Stare index</button>
           </div>
           <div class="status" id="statusIngest"></div>
-          <pre id="outIngest"></pre>
+          <pre class="pre-box" id="outIngest"></pre>
         </div>
+      </div>
 
+      <div id="panel-search" class="panel" role="tabpanel" aria-labelledby="tab-search" hidden>
         <div class="card">
-          <div class="row" style="justify-content: space-between">
-            <label>2) Caută în bibliotecă (RAG)</label>
-            <span class="hint">Fragmente din index; nu e chat liber.</span>
-          </div>
-          <div style="height: 10px"></div>
+          <h2>Căutare în bibliotecă</h2>
+          <p class="lead">RAG pe fragmentele indexate (nu e chat liber).</p>
           <input id="searchQuery" type="text" placeholder="Ex: stoicism, deadline, capitol 3…" />
           <div style="height: 10px"></div>
           <div class="row">
-            <label for="searchK" style="font-weight: 500">k</label>
+            <label class="field" for="searchK">k</label>
             <input id="searchK" type="number" min="1" max="24" value="8" />
-            <button class="primary" id="btnSearch">Caută</button>
+            <button class="primary" type="button" id="btnSearch">Caută</button>
           </div>
           <div class="status" id="statusSearch"></div>
           <div id="outSearchHits"></div>
-          <pre id="outSearch" style="max-height: 280px; overflow: auto"></pre>
+          <pre class="pre-box" id="outSearch" style="max-height: 280px"></pre>
         </div>
+      </div>
 
+      <div id="panel-chat" class="panel" role="tabpanel" aria-labelledby="tab-chat" hidden>
         <div class="card">
-          <div class="row" style="justify-content: space-between">
-            <label>3) Întreabă (doar din documente)</label>
-            <span class="hint">În Chrome: microfonul cere permisiune (https sau localhost).</span>
-          </div>
-          <div style="height: 10px"></div>
+          <h2>Chat pe documente</h2>
+          <p class="lead">În Chrome poți folosi dictarea; răspunsul poate fi citit cu voce.</p>
           <textarea id="chatMessage" placeholder="Ex: Ce spune cartea despre eșec?"></textarea>
           <div style="height: 10px"></div>
           <div class="row">
-            <button class="primary" id="btnAsk">Trimite</button>
-            <button id="btnMic">Vorbește (dictare)</button>
-            <button id="btnSpeak">Citește răspunsul</button>
-            <button id="btnStopSpeak">Stop</button>
+            <button class="primary" type="button" id="btnAsk">Trimite</button>
+            <button type="button" id="btnMic">Dictare</button>
+            <button type="button" id="btnSpeak">Citește răspunsul</button>
+            <button type="button" id="btnStopSpeak">Stop</button>
           </div>
           <div class="status" id="statusChat"></div>
-          <pre id="outChat"></pre>
+          <pre class="pre-box" id="outChat"></pre>
         </div>
+      </div>
 
+      <div id="panel-archive" class="panel" role="tabpanel" aria-labelledby="tab-archive" hidden>
         <div class="card">
-          <div class="row" style="justify-content: space-between">
-            <label>4) Salvează sinteză (Markdown)</label>
-            <span class="hint">Mod implicit: fișier descărcabil (Chrome). Obsidian dacă e setat în server.</span>
-          </div>
-          <div style="height: 10px"></div>
+          <h2>Arhivă sinteză</h2>
+          <p class="lead">Obsidian → Notion → fișier descărcabil, în ordinea configurării pe server.</p>
           <input id="archiveTitle" type="text" placeholder="Titlu pagină" />
           <div style="height: 8px"></div>
           <textarea id="archiveBody" placeholder="Conținut Markdown…"></textarea>
@@ -321,403 +88,127 @@
           <input id="archiveSubdir" type="text" placeholder="Subfolder opțional (ex: Journal/2026)" />
           <div style="height: 10px"></div>
           <div class="row">
-            <button class="primary" id="btnArchive">Salvează / generează link</button>
+            <button class="primary" type="button" id="btnArchive">Salvează</button>
           </div>
           <div class="status" id="statusArchive"></div>
           <div id="archiveLinkRow" class="archive-link" hidden></div>
-          <pre id="outArchive"></pre>
+          <pre class="pre-box" id="outArchive"></pre>
+        </div>
+      </div>
+
+      <div id="panel-drive" class="panel" role="tabpanel" aria-labelledby="tab-drive" hidden>
+        <div class="wizard">
+          <div class="wizard-track" aria-hidden="true">
+            <span class="wizard-pill" id="wizardPill1">1 · Conexiune</span>
+            <span class="wizard-pill" id="wizardPill2">2 · Încarcă</span>
+            <span class="wizard-pill" id="wizardPill3">3 · Rezultat</span>
+          </div>
+
+          <div id="wizardCard1" class="card wizard-card unlocked">
+            <h2>Pasul 1 — Verifică Google Drive</h2>
+            <p class="lead">Asigură-te că integrarea e activă pe server (token OAuth, foldere Stage și bibliotecă).</p>
+            <div class="row">
+              <button type="button" class="primary" id="btnWizardDriveStatus">Verifică starea</button>
+              <a class="link-btn" id="wizardStageLink" href="#" target="_blank" rel="noopener" hidden>Deschide folderul Stage</a>
+            </div>
+            <div class="status" id="statusWizard1"></div>
+          </div>
+
+          <div id="wizardCard2" class="card wizard-card locked">
+            <h2>Pasul 2 — Încarcă în Stage</h2>
+            <p class="lead">
+              Alege unul sau mai multe fișiere (Cmd/Ctrl+clic sau Shift+clic). După <strong>Încarcă în Stage și plasează automat</strong>,
+              apare mai jos o <strong>bară de progres</strong> cu procent (încărcare în Stage, apoi mutare în bibliotecă). Peste 120 de
+              fișiere, plasarea se face în mai multe cereri automate (fără acțiune din partea ta). Serverul continuă singur: plasare după
+              extensie (PDF / Documente / Afise / Powerpoint / Altele), subfoldere, copiere. Fișierele neclasificate automat apar la pasul
+              3 cu listă și dropdown.
+            </p>
+            <label class="lead" style="display: flex; align-items: center; gap: 8px; cursor: pointer; margin: 0 0 12px">
+              <input type="checkbox" id="wizardDriveIngestRag" checked />
+              După fiecare copiere reușită, indexează în RAG (Chroma)
+            </label>
+            <input id="wizardFileInput" type="file" multiple />
+            <div id="wizardPipelineWrap" class="wizard-pipeline-wrap wizard-pipeline-wrap--step2" hidden>
+              <div
+                class="pipeline-progress"
+                role="progressbar"
+                aria-valuemin="0"
+                aria-valuemax="100"
+                aria-valuenow="0"
+                aria-labelledby="wizardPipelineLabel"
+              >
+                <div class="pipeline-progress-bar" id="wizardPipelineBar"></div>
+              </div>
+              <div id="wizardPipelineLabel" class="wizard-pipeline-label"></div>
+            </div>
+            <div class="row" style="margin-top: 10px">
+              <button type="button" class="primary" id="btnWizardUpload">Încarcă în Stage și plasează automat</button>
+            </div>
+            <div class="status" id="statusWizard2"></div>
+            <div id="wizardUploadMeta" class="wizard-upload-meta"></div>
+          </div>
+
+          <div id="wizardCardResult" class="card wizard-card locked">
+            <!-- Flux automat: POST /drive/wizard/auto-place după upload -->
+            <h2>Pasul 3 — Rezultat</h2>
+            <p class="lead">
+              Rezumat după plasare (număr de fișiere). Dacă apare secțiunea „Alegere manuală”, selectează folderul pentru fiecare rând
+              și apasă „Copiază selecțiile”.
+            </p>
+            <div class="status" id="statusWizardAuto"></div>
+            <div id="wizardAutoProgress" class="wizard-upload-meta"></div>
+            <div id="wizardManualSection" hidden>
+              <h3 style="margin: 14px 0 6px; font-size: 1rem; font-weight: 650">Alegere manuală</h3>
+              <p class="lead" style="margin-bottom: 10px">
+                Pentru aceste fișiere nu s-a putut folosi regula pe extensie sau copierea a eșuat. Alege subfolderul din bibliotecă în
+                dreptul fiecăruia.
+              </p>
+              <div id="wizardManualHost"></div>
+              <div class="row" style="margin-top: 12px">
+                <button type="button" class="primary" id="btnWizardManualCopy">Copiază selecțiile</button>
+              </div>
+              <div class="status" id="statusWizardManual"></div>
+            </div>
+            <div class="row" style="margin-top: 14px">
+              <button type="button" id="btnWizardReset">Flux nou (reset)</button>
+            </div>
+            <pre class="pre-box" id="wizardAutoRaw" style="max-height: 220px; margin-top: 10px" hidden></pre>
+          </div>
         </div>
 
-        <div class="card">
-          <div class="row" style="justify-content: space-between">
-            <label>5) Google Drive (Stage → bibliotecă)</label>
-            <span class="hint">Copiere în Drive; vezi și <code>/docs</code> pentru API.</span>
+        <details class="card drive-advanced">
+          <summary>Drive avansat — toate fișierele din Stage</summary>
+          <p class="lead" style="margin-top: 10px">Propune și copiază în bulk, fără fluxul ghidat de mai sus.</p>
+          <div class="row">
+            <button type="button" id="btnDriveStatus">Stare Drive</button>
+            <button class="primary" type="button" id="btnDrivePropose">Propune plasări</button>
+            <button type="button" id="btnDriveCopy">Copiază bifate</button>
           </div>
           <div style="height: 10px"></div>
-          <div class="row">
-            <button id="btnDriveStatus">Stare Drive</button>
-            <button class="primary" id="btnDrivePropose">Propune plasări</button>
-            <button id="btnDriveCopy">Copiază bifate</button>
-          </div>
-          <div style="height: 8px"></div>
-          <label class="hint" style="display: flex; align-items: center; gap: 8px; font-weight: 500; cursor: pointer">
-            <input type="checkbox" id="driveIngestRag" checked />
+          <label class="lead" style="display: flex; align-items: center; gap: 8px; cursor: pointer; margin: 0">
+            <input type="checkbox" id="driveIngestRagBulk" checked />
             După copiere, indexează în RAG (Chroma)
           </label>
           <div class="status" id="statusDrive"></div>
-          <pre id="outDriveRaw" style="max-height: 220px; overflow: auto"></pre>
+          <pre class="pre-box" id="outDriveRaw" style="max-height: 220px"></pre>
           <div id="driveDecisions"></div>
+        </details>
+      </div>
+
+      <div id="panel-service" class="panel" role="tabpanel" aria-labelledby="tab-service" hidden>
+        <div class="card">
+          <h2>Stare serviciu</h2>
+          <p class="lead">Rezumat din API; datele sensibile nu apar aici.</p>
+          <div class="row">
+            <button class="primary" type="button" id="btnServiceRefresh">Reîmprospătează</button>
+          </div>
+          <div class="status" id="statusService"></div>
+          <div id="serviceChips" class="chips"></div>
+          <pre class="pre-box" id="outService" style="max-height: 360px"></pre>
         </div>
       </div>
     </div>
 
-    <script>
-      const apiBase = window.location.origin;
-      document.getElementById("apiBase").textContent = apiBase;
-
-      const el = (id) => document.getElementById(id);
-      const setStatus = (id, text, kind = "") => {
-        const box = el(id);
-        box.textContent = text || "";
-        box.className = "status" + (kind ? " " + kind : "");
-      };
-
-      async function apiGet(path) {
-        const r = await fetch(apiBase + path);
-        const t = await r.text();
-        return { ok: r.ok, status: r.status, text: t, json: () => JSON.parse(t) };
-      }
-
-      async function apiPost(path, body) {
-        const r = await fetch(apiBase + path, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        const t = await r.text();
-        return { ok: r.ok, status: r.status, text: t, json: () => JSON.parse(t) };
-      }
-
-      function escapeHtml(s) {
-        return String(s)
-          .replace(/&/g, "&amp;")
-          .replace(/</g, "&lt;")
-          .replace(/>/g, "&gt;")
-          .replace(/"/g, "&quot;");
-      }
-
-      function renderSearchHits(data) {
-        const host = el("outSearchHits");
-        host.textContent = "";
-        const results = (data && data.results) || [];
-        if (!results.length) return;
-        results.forEach((item, i) => {
-          const md = item.metadata || {};
-          const src = md.source != null ? String(md.source) : "?";
-          const page = md.page != null ? " · p. " + md.page : "";
-          const div = document.createElement("div");
-          div.className = "hit";
-          const meta = document.createElement("div");
-          meta.className = "hit-meta";
-          meta.textContent = String(i + 1) + ". " + src + page;
-          const tx = document.createElement("div");
-          tx.className = "hit-text";
-          tx.textContent = String(item.text || "").slice(0, 1600);
-          div.appendChild(meta);
-          div.appendChild(tx);
-          host.appendChild(div);
-        });
-      }
-
-      function showArchiveActions(data) {
-        const row = el("archiveLinkRow");
-        row.textContent = "";
-        row.hidden = true;
-        if (!data || !data.ok || !data.path_or_url) return;
-        const p = data.path_or_url;
-        if (data.destination === "download" && typeof p === "string" && p.startsWith("/")) {
-          const full = apiBase + p;
-          const a = document.createElement("a");
-          a.href = full;
-          a.target = "_blank";
-          a.rel = "noopener";
-          a.textContent = "Deschide / descarcă .md";
-          const b = document.createElement("button");
-          b.type = "button";
-          b.textContent = "Copiază URL";
-          b.addEventListener("click", async () => {
-            try {
-              await navigator.clipboard.writeText(full);
-              setStatus("statusArchive", "URL copiat în clipboard.", "ok");
-            } catch {
-              setStatus("statusArchive", "Nu am putut copia (permisiune clipboard).", "bad");
-            }
-          });
-          row.appendChild(a);
-          row.appendChild(b);
-          row.hidden = false;
-        }
-      }
-
-      el("btnSearch").addEventListener("click", async () => {
-        const q = (el("searchQuery").value || "").trim();
-        if (!q) {
-          setStatus("statusSearch", "Scrie un termen de căutare.", "bad");
-          return;
-        }
-        let k = parseInt(String(el("searchK").value || "8"), 10);
-        if (Number.isNaN(k) || k < 1) k = 8;
-        if (k > 24) k = 24;
-        setStatus("statusSearch", "Caut…");
-        el("outSearch").textContent = "";
-        el("outSearchHits").textContent = "";
-        try {
-          const qs = new URLSearchParams({ q, k: String(k) });
-          const r = await apiGet("/search?" + qs.toString());
-          el("outSearch").textContent = r.text;
-          setStatus("statusSearch", r.ok ? "OK" : "Error " + r.status, r.ok ? "ok" : "bad");
-          if (r.ok) {
-            try {
-              renderSearchHits(JSON.parse(r.text));
-            } catch {
-              /* ignore */
-            }
-          }
-        } catch (e) {
-          setStatus("statusSearch", "Error: " + e, "bad");
-        }
-      });
-
-      el("btnArchive").addEventListener("click", async () => {
-        const title = (el("archiveTitle").value || "").trim();
-        const body = (el("archiveBody").value || "").trim();
-        const sub = (el("archiveSubdir").value || "").trim();
-        if (!title || !body) {
-          setStatus("statusArchive", "Titlu și conținut sunt obligatorii.", "bad");
-          return;
-        }
-        setStatus("statusArchive", "Salvez…");
-        el("outArchive").textContent = "";
-        el("archiveLinkRow").textContent = "";
-        el("archiveLinkRow").hidden = true;
-        try {
-          const payload = { title, body_markdown: body };
-          if (sub) payload.subdirectory = sub;
-          const r = await apiPost("/archive/page", payload);
-          el("outArchive").textContent = r.text;
-          setStatus("statusArchive", r.ok ? "OK" : "Error " + r.status, r.ok ? "ok" : "bad");
-          if (r.ok) {
-            try {
-              showArchiveActions(JSON.parse(r.text));
-            } catch {
-              /* ignore */
-            }
-          }
-        } catch (e) {
-          setStatus("statusArchive", "Error: " + e, "bad");
-        }
-      });
-
-      let lastDrivePropose = null;
-
-      function renderDriveDecisions(data) {
-        const host = el("driveDecisions");
-        host.innerHTML = "";
-        if (!data || !Array.isArray(data.decisions) || data.decisions.length === 0) {
-          return;
-        }
-        lastDrivePropose = data;
-        const opts = data.folder_options || [];
-        data.decisions.forEach((d, i) => {
-          const row = document.createElement("div");
-          row.className = "drive-row";
-          row.dataset.idx = String(i);
-          const sug = d.suggested_target_folder_id || (opts[0] && opts[0].id) || "";
-          const optHtml = opts
-            .map(
-              (o) =>
-                `<option value="${escapeHtml(o.id)}"${o.id === sug ? " selected" : ""}>${escapeHtml(
-                  o.name || o.id
-                )}</option>`
-            )
-            .join("");
-          row.innerHTML = `
-            <label><input type="checkbox" class="drive-cb" checked /> ${escapeHtml(d.file_name || d.file_id)}</label>
-            <select class="drive-sel">${optHtml}</select>
-            <span class="tag">${d.needs_user ? "confirmă" : "sugestie auto"}</span>
-          `;
-          host.appendChild(row);
-        });
-      }
-
-      el("btnDriveStatus").addEventListener("click", async () => {
-        setStatus("statusDrive", "…");
-        el("outDriveRaw").textContent = "";
-        el("driveDecisions").innerHTML = "";
-        lastDrivePropose = null;
-        try {
-          const r = await apiGet("/drive/status");
-          el("outDriveRaw").textContent = r.text;
-          setStatus("statusDrive", r.ok ? "OK" : "Error " + r.status, r.ok ? "ok" : "bad");
-        } catch (e) {
-          setStatus("statusDrive", "Error: " + e, "bad");
-        }
-      });
-
-      el("btnDrivePropose").addEventListener("click", async () => {
-        setStatus("statusDrive", "Scanare Stage…");
-        el("outDriveRaw").textContent = "";
-        el("driveDecisions").innerHTML = "";
-        lastDrivePropose = null;
-        try {
-          const r = await fetch(apiBase + "/drive/propose", { method: "POST" });
-          const t = await r.text();
-          el("outDriveRaw").textContent = t;
-          setStatus("statusDrive", r.ok ? "OK" : "Error " + r.status, r.ok ? "ok" : "bad");
-          if (r.ok) {
-            try {
-              const data = JSON.parse(t);
-              renderDriveDecisions(data);
-            } catch {
-              /* ignore */
-            }
-          }
-        } catch (e) {
-          setStatus("statusDrive", "Error: " + e, "bad");
-        }
-      });
-
-      el("btnDriveCopy").addEventListener("click", async () => {
-        if (!lastDrivePropose || !lastDrivePropose.decisions) {
-          setStatus("statusDrive", "Rulează mai întâi „Propune plasări”.", "bad");
-          return;
-        }
-        const rows = el("driveDecisions").querySelectorAll(".drive-row");
-        const items = [];
-        rows.forEach((row) => {
-          const cb = row.querySelector(".drive-cb");
-          if (!cb || !cb.checked) return;
-          const sel = row.querySelector(".drive-sel");
-          const idx = Number(row.dataset.idx);
-          const d = lastDrivePropose.decisions[idx];
-          if (!d || !sel) return;
-          items.push({ source_file_id: d.file_id, target_folder_id: sel.value });
-        });
-        if (items.length === 0) {
-          setStatus("statusDrive", "Bifează cel puțin un rând.", "bad");
-          return;
-        }
-        setStatus("statusDrive", "Copiere…");
-        try {
-          const ingest_to_rag = el("driveIngestRag").checked;
-          const r = await apiPost("/drive/copy", { items, ingest_to_rag });
-          el("outDriveRaw").textContent = r.text;
-          setStatus("statusDrive", r.ok ? "OK" : "Error " + r.status, r.ok ? "ok" : "bad");
-          if (r.ok) {
-            el("driveDecisions").innerHTML = "";
-            lastDrivePropose = null;
-          }
-        } catch (e) {
-          setStatus("statusDrive", "Error: " + e, "bad");
-        }
-      });
-
-      el("btnStatus").addEventListener("click", async () => {
-        setStatus("statusIngest", "Loading…");
-        try {
-          const r = await apiGet("/status");
-          el("outIngest").textContent = r.text;
-          setStatus("statusIngest", r.ok ? "OK" : "Error " + r.status, r.ok ? "ok" : "bad");
-        } catch (e) {
-          setStatus("statusIngest", "Error: " + e, "bad");
-        }
-      });
-
-      el("btnIngest").addEventListener("click", async () => {
-        const files = el("fileInput").files;
-        if (!files || files.length === 0) {
-          setStatus("statusIngest", "Alege fișierele întâi.", "bad");
-          return;
-        }
-        setStatus("statusIngest", "Indexare…");
-        el("outIngest").textContent = "";
-        const fd = new FormData();
-        for (const f of files) fd.append("files", f);
-        try {
-          const r = await fetch(apiBase + "/ingest/files", { method: "POST", body: fd });
-          const t = await r.text();
-          el("outIngest").textContent = t;
-          setStatus("statusIngest", r.ok ? "OK" : "Error " + r.status, r.ok ? "ok" : "bad");
-        } catch (e) {
-          setStatus("statusIngest", "Error: " + e, "bad");
-        }
-      });
-
-      el("btnAsk").addEventListener("click", async () => {
-        const msg = (el("chatMessage").value || "").trim();
-        if (!msg) {
-          setStatus("statusChat", "Scrie o întrebare.", "bad");
-          return;
-        }
-        setStatus("statusChat", "Întreb…");
-        el("outChat").textContent = "";
-        try {
-          const r = await fetch(apiBase + "/chat", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ message: msg, k: 8 }),
-          });
-          const t = await r.text();
-          el("outChat").textContent = t;
-          setStatus("statusChat", r.ok ? "OK" : "Error " + r.status, r.ok ? "ok" : "bad");
-        } catch (e) {
-          setStatus("statusChat", "Error: " + e, "bad");
-        }
-      });
-
-      function supportsSpeechRecognition() {
-        return !!(window.SpeechRecognition || window.webkitSpeechRecognition);
-      }
-
-      let rec = null;
-      el("btnMic").addEventListener("click", () => {
-        if (!supportsSpeechRecognition()) {
-          setStatus("statusChat", "SpeechRecognition nu e disponibil (încearcă Chrome).", "bad");
-          return;
-        }
-        const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-        rec = new SR();
-        rec.lang = "ro-RO";
-        rec.interimResults = true;
-        rec.continuous = false;
-
-        let finalText = "";
-        rec.onresult = (ev) => {
-          let interim = "";
-          for (let i = ev.resultIndex; i < ev.results.length; i++) {
-            const txt = ev.results[i][0].transcript;
-            if (ev.results[i].isFinal) finalText += txt;
-            else interim += txt;
-          }
-          el("chatMessage").value = (finalText + " " + interim).trim();
-        };
-        rec.onerror = (e) => setStatus("statusChat", "Mic error: " + e.error, "bad");
-        rec.onstart = () => setStatus("statusChat", "Ascult…");
-        rec.onend = () => setStatus("statusChat", "Dictare oprită.", "ok");
-        rec.start();
-      });
-
-      function speak(text) {
-        if (!("speechSynthesis" in window)) {
-          setStatus("statusChat", "SpeechSynthesis nu e disponibil.", "bad");
-          return;
-        }
-        window.speechSynthesis.cancel();
-        const u = new SpeechSynthesisUtterance(text);
-        u.lang = "ro-RO";
-        u.rate = 1.02;
-        window.speechSynthesis.speak(u);
-      }
-
-      el("btnSpeak").addEventListener("click", () => {
-        const raw = el("outChat").textContent || "";
-        try {
-          const j = JSON.parse(raw);
-          const ans = String(j.answer || "").trim();
-          if (!ans) {
-            setStatus("statusChat", "Nu am un answer de citit.", "bad");
-            return;
-          }
-          speak(ans);
-        } catch {
-          setStatus("statusChat", "Răspunsul nu e JSON (nu pot extrage answer).", "bad");
-        }
-      });
-
-      el("btnStopSpeak").addEventListener("click", () => {
-        if ("speechSynthesis" in window) window.speechSynthesis.cancel();
-      });
-    </script>
+    <script src="/static/js/app.js?v=6"></script>
   </body>
 </html>
-
