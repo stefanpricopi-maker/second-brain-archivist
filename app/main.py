@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -22,6 +22,7 @@ from app.ingest import (
     extract_docx,
     extract_epub,
     extract_pdf,
+    extract_pdf_for_voice_shelf,
     extract_text_like,
     save_upload,
 )
@@ -34,7 +35,7 @@ from app.drive_settings import load_drive_settings
 from app.drive_util import folder_id_from_drive_url
 from app.logging_setup import configure_logging, request_id_ctx
 from app.middleware.http_limits import RateLimitMiddleware, StaticCacheControlMiddleware
-from app.path_security import resolve_export_download
+from app.ocr_pdf import ocr_backend_status
 from app.rag import LibraryRAGIndex
 from openai import OpenAI
 
@@ -82,6 +83,10 @@ app = FastAPI(
         {"name": "chat", "description": "Întrebări cu context din cărți și notițe."},
         {"name": "archive", "description": "Salvare sinteză: Obsidian, Notion (token + parent), sau download Chrome."},
         {"name": "drive", "description": "Google Drive: Stage → bibliotecă (copiere, clasificare)."},
+        {
+            "name": "voice_library",
+            "description": "Cărți scanate (OCR) și întrebări restrânse la o sursă din bibliotecă; separat de Drive.",
+        },
     ],
 )
 
@@ -139,23 +144,40 @@ def status() -> dict[str, Any]:
             "enabled": bool(DRIVE_SETTINGS),
             "token_present": bool(DRIVE_SETTINGS and DRIVE_SETTINGS.token_path.is_file()),
         },
+        "voice_library": {"ocr": ocr_backend_status()},
     }
 
 
+def _metadata_source_filter(source: str | None) -> dict[str, Any] | None:
+    """Filtru Chroma pe câmpul metadata `source` (egalitate exactă)."""
+    s = (source or "").strip()
+    if not s:
+        return None
+    if len(s) > 512:
+        raise HTTPException(status_code=422, detail="Parametrul «source» e prea lung (max 512).")
+    return {"source": {"$eq": s}}
+
+
 @app.get("/search", tags=["library"])
-def search(q: str, k: int = 8) -> dict[str, Any]:
+def search(q: str, k: int = 8, source: str | None = None) -> dict[str, Any]:
     q = (q or "").strip()
     if not q:
         raise HTTPException(status_code=400, detail="Missing q.")
     if k < 1 or k > 24:
         raise HTTPException(status_code=400, detail="k must be 1..24")
-    chunks = rag.query(q, k=k)
-    return {"query": q, "k": k, "results": chunks}
+    where = _metadata_source_filter(source)
+    chunks = rag.query(q, k=k, where=where)
+    return {"query": q, "k": k, "source": (source or "").strip() or None, "results": chunks}
 
 
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=20_000)
     k: int = Field(default=8, ge=1, le=24)
+    source: str | None = Field(
+        default=None,
+        max_length=512,
+        description="Opțional: restrânge fragmentele RAG la metadata «source» (aceeași valoare ca în listă / upload).",
+    )
 
 
 class ChatResponse(BaseModel):
@@ -169,8 +191,15 @@ class IngestResponse(BaseModel):
     rag_chunks: int
 
 
-def _fallback_answer(query: str, chunks: list[dict[str, Any]]) -> str:
+def _fallback_answer(query: str, chunks: list[dict[str, Any]], *, source: str | None = None) -> str:
     if not chunks:
+        src = (source or "").strip()
+        if src:
+            return (
+                f"Nu am găsit fragmente în index pentru sursa «{src}» și întrebarea ta. "
+                "Verifică că ai selectat exact sursa din listă sau re-indexează cartea din tab-ul «Cărți & voce». "
+                f"Întrebare: {query[:200]}"
+            )
         return (
             "Nu am găsit fragmente în index (rulează `python scripts/ingest_library.py` după ce pui PDF/MD în "
             f"{LIBRARY_DIR}). Întrebarea ta: {query[:200]}"
@@ -194,9 +223,13 @@ def _fallback_answer(query: str, chunks: list[dict[str, Any]]) -> str:
 @app.post("/chat", response_model=ChatResponse, tags=["chat"])
 def chat(req: ChatRequest) -> ChatResponse:
     query = req.message.strip()
-    chunks = rag.query(query, k=req.k)
+    where = _metadata_source_filter(req.source)
+    chunks = rag.query(query, k=req.k, where=where)
     if LLM_MODE != "openai" or client is None:
-        return ChatResponse(answer=_fallback_answer(query, chunks), used_chunks=chunks)
+        return ChatResponse(
+            answer=_fallback_answer(query, chunks, source=req.source),
+            used_chunks=chunks,
+        )
 
     rendered = []
     for i, ch in enumerate(chunks, start=1):
@@ -204,7 +237,13 @@ def chat(req: ChatRequest) -> ChatResponse:
         src = md.get("source", "?")
         header = f"[{i}] {src}"
         rendered.append(header + "\n" + (ch.get("text") or ""))
-    user_block = query + "\n\nFragmente:\n" + "\n---\n".join(rendered) if rendered else query
+    sf = (req.source or "").strip()
+    prefix = (
+        f"Contextul este restrâns la o singură sursă din bibliotecă (metadata source = «{sf}»).\n\n"
+        if sf
+        else ""
+    )
+    user_block = prefix + (query + "\n\nFragmente:\n" + "\n---\n".join(rendered) if rendered else query)
 
     try:
         r = client.chat.completions.create(
@@ -276,7 +315,7 @@ async def ingest_files(files: list[UploadFile] = File(...)) -> IngestResponse:
                     {
                         "filename": name,
                         "status": "error",
-                        "detail": "nu s-a extras text (PDF scanat? OCR încă neimplementat).",
+                        "detail": "nu s-a extras text util. Pentru scanări folosește tab-ul «Cărți & voce» (OCR) sau `POST /voice-library/ingest`.",
                         "saved_path": str(saved),
                     }
                 )
@@ -295,6 +334,102 @@ async def ingest_files(files: list[UploadFile] = File(...)) -> IngestResponse:
                 }
             )
         except Exception as e:
+            summaries.append({"filename": name, "status": "error", "detail": str(e), "saved_path": str(saved)})
+
+    return IngestResponse(
+        status="ok",
+        files=summaries,
+        added_chunks=added,
+        rag_chunks=rag.count(),
+    )
+
+
+@app.get(
+    "/voice-library/ocr-status",
+    tags=["voice_library"],
+    summary="Stare OCR (Tesseract + poppler)",
+    description="Verifică dacă serverul poate rula OCR pentru PDF-uri scanate (dependențe Python + binar tesseract).",
+)
+def voice_library_ocr_status() -> dict[str, Any]:
+    return ocr_backend_status()
+
+
+@app.get(
+    "/voice-library/sources",
+    tags=["voice_library"],
+    summary="Surse distincte în index",
+    description="Listează valorile `source` din metadata Chroma (pentru a restrânge chat-ul la o carte).",
+)
+def voice_library_sources() -> dict[str, Any]:
+    return {"ok": True, "sources": rag.list_sources(), "rag_chunks": rag.count()}
+
+
+@app.post(
+    "/voice-library/ingest",
+    response_model=IngestResponse,
+    tags=["voice_library"],
+    summary="Încarcă PDF scanat (cu OCR dacă e nevoie)",
+    description=(
+        "Multipart: `files` (PDF). Form: `book_label` (opțional, afișat în listă), `force_ocr` = auto|true|false. "
+        "Zona e separată de Google Drive; fișierele merg în uploads local + index RAG."
+    ),
+)
+async def voice_library_ingest(
+    files: list[UploadFile] = File(...),
+    book_label: str = Form(""),
+    force_ocr: str = Form("auto"),
+) -> IngestResponse:
+    summaries: list[dict[str, Any]] = []
+    added = 0
+    bl = (book_label or "").strip() or None
+    for f in files:
+        name = (f.filename or "upload").strip() or "upload"
+        raw = await f.read()
+        if not raw:
+            summaries.append({"filename": name, "status": "error", "detail": "empty"})
+            continue
+        if not name.lower().endswith(".pdf"):
+            summaries.append(
+                {
+                    "filename": name,
+                    "status": "error",
+                    "detail": "În «Cărți & voce» acceptăm doar .pdf (scanat sau text).",
+                }
+            )
+            continue
+
+        saved = save_upload(uploads_dir=UPLOADS_DIR, filename=name, content=raw)
+        try:
+            doc = extract_pdf_for_voice_shelf(
+                filename=name,
+                content=raw,
+                book_label=bl,
+                force_ocr=(force_ocr or "auto").strip(),
+            )
+            texts, metas, ids = docs_to_chunks(doc=doc)
+            if not texts:
+                summaries.append(
+                    {
+                        "filename": name,
+                        "status": "error",
+                        "detail": "nu s-au putut genera fragmente după OCR/extragere.",
+                        "saved_path": str(saved),
+                    }
+                )
+                continue
+            rag.add_texts(ids=ids, texts=texts, metadatas=metas)
+            added += len(ids)
+            summaries.append(
+                {
+                    "filename": name,
+                    "status": "ok",
+                    "saved_path": str(saved),
+                    "chunks_added": len(ids),
+                    "source_type": doc.source_type,
+                    "meta": doc.meta,
+                }
+            )
+        except Exception as e:  # noqa: BLE001
             summaries.append({"filename": name, "status": "error", "detail": str(e), "saved_path": str(saved)})
 
     return IngestResponse(
