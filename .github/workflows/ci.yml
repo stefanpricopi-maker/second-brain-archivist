@@ -11,6 +11,9 @@ permissions:
 env:
   LLM_MODE: disabled
   ANONYMIZED_TELEMETRY: "False"
+  CI: "true"
+  RATE_LIMIT_ENABLED: "false"
+  PYTHONHASHSEED: "0"
 
 jobs:
   pytest:
