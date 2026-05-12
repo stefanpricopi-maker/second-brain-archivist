@@ -7,8 +7,9 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-# Limbi Tesseract: ex. "ron+eng" (vezi `tesseract --list-langs`).
-DEFAULT_OCR_LANG = (os.getenv("OCR_LANG") or "ron+eng").strip() or "ron+eng"
+# Limbi Tesseract: cod ISO 639-2 (română = `ron`). Pentru text mixt ro+en: `ron+eng`. Vezi `tesseract --list-langs`.
+# macOS: `brew install tesseract-lang` pentru pachete de limbă (inclusiv română).
+DEFAULT_OCR_LANG = (os.getenv("OCR_LANG") or "ron").strip() or "ron"
 DEFAULT_OCR_DPI = max(72, min(400, int(os.getenv("OCR_DPI") or "200")))
 
 
@@ -122,8 +123,9 @@ def ocr_pdf_pages(*, content: bytes, dpi: int | None = None, lang: str | None = 
             err = str(e)
             if "tessdata" in err.lower() or "traineddata" in err.lower():
                 raise RuntimeError(
-                    f"OCR: limbi lipsă pentru «{lang_use}». Instalează pachetele tesseract pentru limbile folosite "
-                    f"sau setează OCR_LANG=eng în .env. Detaliu: {err}"
+                    f"OCR: lipsesc datele de limbă pentru «{lang_use}». Pe macOS: `brew install tesseract-lang` "
+                    f"(română: `ron`). Poți seta în .env doar română: `OCR_LANG=ron` sau mixt: `OCR_LANG=ron+eng`. "
+                    f"Detaliu: {err}"
                 ) from e
         pages.append(txt.strip())
     return pages

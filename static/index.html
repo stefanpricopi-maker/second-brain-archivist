@@ -104,6 +104,7 @@
             Zonă separată de <strong>Google Drive</strong>: încarci PDF-uri scanate de tine, serverul le citește (OCR dacă e nevoie), le
             pune în indexul local, apoi poți <strong>întreba cu vocea</strong> despre <strong>cartea aleasă</strong> din listă și
             asculta răspunsul. Microfonul și citirea vocală folosesc browserul (Chrome recomandat).
+            <strong>OCR implicit în română</strong> (Tesseract <code>ron</code>); pe macOS, pentru limbi suplimentare: <code>brew install tesseract-lang</code>.
             API: <code>POST /voice-library/ingest</code>, <code>GET /voice-library/sources</code>, <code>POST /chat</code> cu <code>source</code>.
           </p>
           <div class="status" id="statusVoiceOcr" style="margin-bottom: 10px"></div>
@@ -259,6 +260,6 @@
       </div>
     </div>
 
-    <script src="/static/js/app.js?v=8"></script>
+    <script src="/static/js/app.js?v=9"></script>
   </body>
 </html>

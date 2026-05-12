@@ -106,8 +106,8 @@ def extract_pdf_for_voice_shelf(
     ocr_joined = sum(len(p or "") for p in ocr_pages)
     if ocr_joined < 8:
         raise ValueError(
-            "OCR: text aproape gol. Verifică calitatea scanării, limba (OCR_LANG în .env) și că ai instalat "
-            "datele de antrenament tesseract pentru limbile folosite."
+            "OCR: text aproape gol. Verifică calitatea scanării; pe macOS: `brew install tesseract-lang` (română `ron`). "
+            "Implicit folosim `OCR_LANG=ron`; pentru mixt ro+en pune în `.env` `OCR_LANG=ron+eng`."
         )
     meta = dict(meta_base)
     meta["ocr"] = True
