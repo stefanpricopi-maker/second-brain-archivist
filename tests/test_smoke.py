@@ -37,6 +37,8 @@ def test_static_ui_served(client: TestClient) -> None:
     assert "wizardCardResult" in r.text
     assert "wizardPipelineWrap" in r.text
     assert "/drive/wizard/auto-place" in r.text
+    assert "panel-voice" in r.text
+    assert "/voice-library/ingest" in r.text
 
 
 def test_static_ui_assets(client: TestClient) -> None:
