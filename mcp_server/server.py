@@ -26,10 +26,16 @@ if str(PROJECT_ROOT) not in sys.path:
 load_dotenv(PROJECT_ROOT / ".env")
 
 from app import drive_google  # noqa: E402
-from app.connectors import BrowserDownloadSink, ObsidianVaultSink, StubArchiveSink  # noqa: E402
+from app.connectors import BrowserDownloadSink, ObsidianVaultSink  # noqa: E402
+from app.connectors.notion_api import load_notion_sink_from_env  # noqa: E402
 from app.drive_ingest import copy_drive_items_with_optional_rag  # noqa: E402
 from app.drive_organize import library_folder_options, propose_stage  # noqa: E402
 from app.drive_settings import load_drive_settings  # noqa: E402
+from app.drive_wizard import (  # noqa: E402
+    auto_place_uploaded_file_ids,
+    chunk_source_file_ids,
+    merge_wizard_auto_place_payloads,
+)
 from app.rag import LibraryRAGIndex  # noqa: E402
 from openai import OpenAI  # noqa: E402
 
@@ -52,6 +58,9 @@ def _sink() -> Any:
     if raw:
         sub = os.getenv("OBSIDIAN_DEFAULT_SUBDIR", "SecondBrain/Inbox").strip()
         return ObsidianVaultSink(Path(raw), default_subdir=sub)
+    notion = load_notion_sink_from_env()
+    if notion is not None:
+        return notion
     exports = Path(os.getenv("EXPORTS_DIR", "./data/exports")).resolve()
     return BrowserDownloadSink(exports)
 
@@ -76,9 +85,42 @@ def library_chunk_count() -> str:
 @mcp.tool()
 def archive_save_markdown_page(title: str, body_markdown: str, subdirectory: str | None = None) -> str:
     """
-    Salvează o pagină Markdown: Obsidian (dacă OBSIDIAN_VAULT_PATH) sau link descărcabil (Chrome).
+    Salvează o pagină Markdown: Obsidian (dacă OBSIDIAN_VAULT_PATH), Notion (dacă NOTION_TOKEN + parent),
+    altfel link descărcabil (Chrome).
     """
     sink = _sink()
+    res = sink.save_markdown_page(
+        title=title.strip(),
+        body_markdown=body_markdown,
+        subdirectory=subdirectory,
+    )
+    return json.dumps(
+        {
+            "ok": res.ok,
+            "destination": res.destination,
+            "path_or_url": res.path_or_url,
+            "detail": res.detail,
+        },
+        ensure_ascii=False,
+    )
+
+
+@mcp.tool()
+def notion_create_page(title: str, body_markdown: str, subdirectory: str | None = None) -> str:
+    """
+    Creează o pagină în Notion (NOTION_TOKEN + NOTION_PARENT_PAGE_ID sau NOTION_DATABASE_ID).
+    Ignoră Obsidian: folosește doar integrarea Notion.
+    """
+    sink = load_notion_sink_from_env()
+    if sink is None:
+        return json.dumps(
+            {
+                "ok": False,
+                "error": "notion_not_configured",
+                "detail": "Setează NOTION_TOKEN și exact unul dintre NOTION_PARENT_PAGE_ID / NOTION_DATABASE_ID.",
+            },
+            ensure_ascii=False,
+        )
     res = sink.save_markdown_page(
         title=title.strip(),
         body_markdown=body_markdown,
@@ -182,6 +224,39 @@ def drive_copy_items(items_json: str) -> str:
         ingest_to_rag=ingest_to_rag,
     )
     return json.dumps(out, ensure_ascii=False)
+
+
+@mcp.tool()
+def drive_wizard_auto_place(source_file_ids_json: str, ingest_to_rag: bool = False) -> str:
+    """
+    Plasare automată wizard (aceeași logică ca `POST /drive/wizard/auto-place`): primește un JSON array
+    de Google `file_id` din Stage. Listele lungi sunt împărțite automat în bucăți (max 120/cerere) și rezultatele unite.
+    Răspuns: JSON cu `succeeded`, `needs_manual`, `skipped`, `folder_options`, `rag_chunks`, `ok`.
+    """
+    st, svc = _drive_service()
+    if not st or svc is None:
+        return json.dumps({"ok": False, "error": "drive_not_ready"}, ensure_ascii=False)
+    try:
+        raw = json.loads(source_file_ids_json or "[]")
+    except json.JSONDecodeError as e:
+        return json.dumps({"ok": False, "error": f"invalid json: {e}"}, ensure_ascii=False)
+    if not isinstance(raw, list):
+        return json.dumps({"ok": False, "error": "payload must be a JSON array of file ids"}, ensure_ascii=False)
+    ids = [str(x).strip() for x in raw if str(x).strip()]
+    if not ids:
+        return json.dumps({"ok": False, "error": "empty source_file_ids"}, ensure_ascii=False)
+    parts: list[dict[str, Any]] = []
+    for chunk in chunk_source_file_ids(ids):
+        out = auto_place_uploaded_file_ids(
+            svc,
+            st,
+            source_file_ids=chunk,
+            ingest_to_rag=ingest_to_rag,
+            rag=_rag,
+        )
+        parts.append(out)
+    merged = merge_wizard_auto_place_payloads(parts)
+    return json.dumps(merged, ensure_ascii=False)
 
 
 if __name__ == "__main__":
