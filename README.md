@@ -5,7 +5,7 @@ Agent personal: **citești și întrebi** cărți (PDF), articole și notițe (M
 ## Rol în două propoziții
 
 1. **RAG:** indexezi sute de fișiere din `data/library/` + notițe din `knowledge/public/`; `GET /search` și `POST /chat` folosesc același index.
-2. **Arhivă:** `POST /archive/page` scrie un `.md` în `data/exports/` și returnează un link `GET /archive/files/...` pentru download (Chrome). Obsidian rămâne opțional dacă setezi `OBSIDIAN_VAULT_PATH`.
+2. **Arhivă:** `POST /archive/page` — **Obsidian** dacă `OBSIDIAN_VAULT_PATH`; altfel **Notion** dacă `NOTION_TOKEN` + parent (pagină sau bază de date); altfel `.md` în `data/exports/` + link `GET /archive/files/...` (Chrome).
 
 ## Quick start
 
@@ -33,11 +33,11 @@ bash scripts/ingest.sh
 ```
 
 - API: `http://127.0.0.1:8090/docs`
-- UI: `http://127.0.0.1:8090/static/index.html` (ingest, **căutare RAG**, chat + voce, **arhivare .md** cu link, Drive: status / propunere / copiere)
+- UI: `http://127.0.0.1:8090/static/index.html` — tab-uri (Index, Căutare, Chat, Arhivă, Drive, Serviciu); **Drive** — wizard în 3 pași: conexiune → încărcare în Stage (`POST /drive/stage/upload`) → **plasare automată** (`POST /drive/wizard/auto-place`, max. 120 ID-uri/cerere; UI împarte automat listele mai lungi în mai multe cereri), după extensie; la nevoie, listă + dropdown pentru remedieri manuale. „Drive avansat” pentru bulk din Stage.
 - Dacă vezi **`No module named 'app'`**: nu ești în rădăcina proiectului sau folosești venv-ul altui proiect (ex. `audi-vcds-master`). `pwd` trebuie să fie `…/second-brain-archivist` (conține `app/`, `scripts/`).
 - Chat fără OpenAI: în `.env` pune `LLM_MODE=disabled` — răspuns din fragmente RAG.
-- Arhivare (Chrome): după `POST /archive/page`, deschide `path_or_url` în browser ca să descarci `.md`.
-- Upload + „învață din documente”: `POST /ingest/files` (multipart) acceptă `.pdf`, `.txt`, `.md`, `.docx`. Pentru PDF-uri scanate: OCR nu e încă implementat (roadmap).
+- Arhivare: după `POST /archive/page`, `path_or_url` poate fi link Notion, cale Obsidian, sau URL relativ pentru download (Chrome).
+- Upload + „învață din documente”: `POST /ingest/files` (multipart) acceptă `.pdf`, `.epub`, `.txt`, `.md`, `.docx`. Pentru PDF-uri scanate: OCR nu e încă implementat (roadmap).
 
 ## MCP (Cursor / Claude Desktop)
 
@@ -45,29 +45,40 @@ bash scripts/ingest.sh
 python -m mcp_server.server
 ```
 
-Unelte: `library_search`, `library_chunk_count`, `archive_save_markdown_page`, plus Drive: `drive_status`, `drive_library_folders`, `drive_propose_stage`, `drive_copy_items`. Vezi `spec/mcp-and-notion-v0.1.md` pentru Notion.
+Unelte: `library_search`, `library_chunk_count`, `archive_save_markdown_page`, `notion_create_page` (doar Notion), plus Drive: `drive_status`, `drive_library_folders`, `drive_propose_stage`, `drive_copy_items`, `drive_wizard_auto_place` (plasare automată cu chunking la fel ca API-ul). Vezi `spec/mcp-and-notion-v0.1.md`.
 
 ### Google Drive (Stage → bibliotecă)
 
 1. Activează **Google Drive API** în Google Cloud; OAuth client **Desktop**; descarcă JSON-ul ca `data/drive/client_secret.json` (nu comite secretul).
 2. În `.env`: `GOOGLE_DRIVE_STAGE_FOLDER_ID`, `GOOGLE_DRIVE_LIBRARY_ROOT_FOLDER_ID` (ID din URL `.../folders/<ID>`).
 3. `python scripts/drive_auth.py` — deschide browserul, salvează `data/drive/token.json`.
-4. API: `GET /drive/status`, `GET /drive/folders`, `POST /drive/propose`, `POST /drive/copy` cu `{"items":[...], "ingest_to_rag": true}` — **copiere** (originalul rămâne în Stage); dacă `ingest_to_rag` e true, după copiere fișierul e descărcat din bibliotecă și adăugat în **Chroma**. În UI, bifă „indexează în RAG”. După `GOOGLE_DRIVE_MIN_AUTO` confirmări (implicit 2), `propose` poate marca `needs_user: false` când LLM-ul e activ (`LLM_MODE=openai`).
+4. API: `GET /drive/status`, `GET /drive/folders`, `POST /drive/stage/upload` (multipart `files`), `POST /drive/propose`, `POST /drive/copy` cu `{"items":[...], "ingest_to_rag": true}` — **copiere** (originalul rămâne în Stage); dacă `ingest_to_rag` e true, după copiere fișierul e descărcat din bibliotecă și adăugat în **Chroma**. Opțional `GOOGLE_DRIVE_STAGE_FOLDER_URL` — link deschis din UI la folderul Stage. După `GOOGLE_DRIVE_MIN_AUTO` confirmări (implicit 2), `propose` poate marca `needs_user: false` când LLM-ul e activ (`LLM_MODE=openai`).
+5. **Subfoldere după extensie (implicit):** la `POST /drive/propose`, dacă `GOOGLE_DRIVE_THEME_PATHS` nu e dezactivat, pentru fiecare fișier se folosește **doar extensia**: `.pdf` → folder **PDF**, `.doc`/`.docx` → **Documente**, `.png`/`.jpeg`/`.jpg` → **Afise**, `.ppt`/`.pptx` → **Powerpoint**, altceva → **Altele**. Folderele lipsă sunt create sub `GOOGLE_DRIVE_LIBRARY_ROOT_FOLDER_ID`. Dezactivare: `GOOGLE_DRIVE_THEME_PATHS=false` (rămâne doar sugestia între folderele deja existente sub rădăcină).
+6. **Batch fără UI (mii de fișiere):** `POST /drive/batch/auto-organize` cu JSON `{"source_folder_id":"…"}` (sau omis = folder Stage), `recursive`, `max_files` (max 500 per cerere), `ingest_to_rag`, `pause_sec` — citește fișier cu fișier, sare peste ID-urile deja copiate (memorie), copiază în subfolderul după extensie. Pentru volume mari rulează din terminal: `python scripts/drive_batch_auto_organize.py` (implicit până la 50 000 fișiere, opțiuni `--recursive`, `--ingest-rag`, `--dry-run`). Raport: `data/drive/batch_last_report.json`.
+7. **Wizard după upload:** `POST /drive/wizard/auto-place` cu `{"source_file_ids":["…"],"ingest_to_rag":false}` — max. 120 ID-uri per cerere (server); UI-ul trimite automat mai multe cereri dacă lista e mai lungă. Pentru mii de fișiere deja în Stage, folosește `python scripts/drive_batch_auto_organize.py`.
 
 ## Structură (kit)
 
 | Path | Rol |
 |------|-----|
-| `app/main.py` | FastAPI: health, search, chat, archive |
+| `app/main.py` | FastAPI: health, search, chat, archive, ingest, Drive (inclusiv wizard) |
 | `app/rag.py` | Chroma `second_brain_library` |
-| `app/connectors/` | Download (Chrome) + Obsidian opțional + stub |
-| `scripts/ingest_library.py` | PDF + MD + TXT (EPUB = roadmap) |
+| `app/connectors/` | Download (Chrome), Obsidian, Notion API |
+| `scripts/ingest_library.py` | PDF + EPUB + MD + TXT în `data/library/` |
 | `mcp_server/server.py` | MCP FastMCP |
 | `spec/` | Definiție agent, arhitectură, plan teste, integrări |
 
 ## Confidențialitate
 
 Datele tale rămân **local** (disc + vector store). Notion/Drive implică **token** și politica furnizorului — documentează înainte de activare.
+
+## Hardening (operare)
+
+- **Request ID**: răspunsul include `X-Request-ID` (poți trimite același header la intrare); logurile pe stdout folosesc `LOG_LEVEL` și prefix `[rid=…]` (`app/logging_setup.py`).
+- **Rate limit**: per IP, în memorie, separat GET vs POST (`RATE_LIMIT_GET_PER_MINUTE`, `RATE_LIMIT_POST_PER_MINUTE`). Dezactivare: `RATE_LIMIT_ENABLED=false` (implicit în `tests/conftest.py` și în CI).
+- **Path traversal**: `GET /archive/files/…` și subdirectoarele pentru arhivă (Obsidian / export) folosesc validare strictă (`app/path_security.py`).
+- **Static UI**: `Cache-Control: public, max-age=3600` pentru `/static/`.
+- **Teste**: `pytest` cu `--timeout=120` (vezi `requirements-dev.txt` + `pytest.ini`).
 
 ## Repo GitHub dedicat (split din monorepo)
 
