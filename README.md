@@ -33,11 +33,11 @@ bash scripts/ingest.sh
 ```
 
 - API: `http://127.0.0.1:8090/docs`
-- UI: `http://127.0.0.1:8090/static/index.html` — tab-uri (Index, Căutare, Chat, Arhivă, Drive, Serviciu); **Drive** — wizard în 3 pași: conexiune → încărcare în Stage (`POST /drive/stage/upload`) → **plasare automată** (`POST /drive/wizard/auto-place`, max. 120 ID-uri/cerere; UI împarte automat listele mai lungi în mai multe cereri), după extensie; la nevoie, listă + dropdown pentru remedieri manuale. „Drive avansat” pentru bulk din Stage.
+- UI: `http://127.0.0.1:8090/static/index.html` — tab-uri (Index, Căutare, Chat, Arhivă, **Cărți & voce**, Drive, Serviciu). **Cărți & voce** (separat de Drive): PDF scanat → OCR local (Tesseract) → index RAG; alegi cartea din listă; **întrebare vocală** + **răspuns citit** în browser (Chrome). **Drive** — wizard în 3 pași: conexiune → încărcare în Stage (`POST /drive/stage/upload`) → **plasare automată** (`POST /drive/wizard/auto-place`, max. 120 ID-uri/cerere; UI împarte automat listele mai lungi în mai multe cereri), după extensie; la nevoie, listă + dropdown pentru remedieri manuale. „Drive avansat” pentru bulk din Stage.
 - Dacă vezi **`No module named 'app'`**: nu ești în rădăcina proiectului sau folosești venv-ul altui proiect (ex. `audi-vcds-master`). `pwd` trebuie să fie `…/second-brain-archivist` (conține `app/`, `scripts/`).
 - Chat fără OpenAI: în `.env` pune `LLM_MODE=disabled` — răspuns din fragmente RAG.
 - Arhivare: după `POST /archive/page`, `path_or_url` poate fi link Notion, cale Obsidian, sau URL relativ pentru download (Chrome).
-- Upload + „învață din documente”: `POST /ingest/files` (multipart) acceptă `.pdf`, `.epub`, `.txt`, `.md`, `.docx`. Pentru PDF-uri scanate: OCR nu e încă implementat (roadmap).
+- Upload + „învață din documente”: `POST /ingest/files` (multipart) acceptă `.pdf`, `.epub`, `.txt`, `.md`, `.docx`. Pentru **PDF-uri scanate** folosește tab-ul **Cărți & voce** sau `POST /voice-library/ingest` (OCR cu **Tesseract** + **poppler** pe server). Pe macOS: `brew install tesseract tesseract-lang poppler`; Ubuntu: `apt install tesseract-ocr tesseract-ocr-ron tesseract-ocr-eng poppler-utils`. Opțional în `.env`: `OCR_LANG=ron+eng`, `OCR_DPI=200`.
 
 ## MCP (Cursor / Claude Desktop)
 
@@ -61,7 +61,8 @@ Unelte: `library_search`, `library_chunk_count`, `archive_save_markdown_page`, `
 
 | Path | Rol |
 |------|-----|
-| `app/main.py` | FastAPI: health, search, chat, archive, ingest, Drive (inclusiv wizard) |
+| `app/main.py` | FastAPI: health, search, chat, ingest, voice-library (OCR), archive, Drive |
+| `app/ocr_pdf.py` | OCR PDF (Tesseract + pdf2image) |
 | `app/rag.py` | Chroma `second_brain_library` |
 | `app/connectors/` | Download (Chrome), Obsidian, Notion API |
 | `scripts/ingest_library.py` | PDF + EPUB + MD + TXT în `data/library/` |
