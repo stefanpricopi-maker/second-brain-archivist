@@ -7,6 +7,9 @@ python-multipart
 openai
 chromadb
 pypdf
+Pillow
+pdf2image
+pytesseract
 mcp
 python-docx
 ebooklib
