@@ -35,6 +35,9 @@ class ExtractedDoc:
     meta: dict[str, Any]
 
 
+PDF_MIN_TEXT_CHARS = 80
+
+
 def extract_pdf(*, filename: str, content: bytes) -> ExtractedDoc:
     reader = PdfReader(io.BytesIO(content))
     pages: list[str] = []
@@ -48,6 +51,72 @@ def extract_pdf(*, filename: str, content: bytes) -> ExtractedDoc:
         source_type="pdf",
         pages=pages,
         meta={"page_count": len(pages)},
+    )
+
+
+def _pdf_text_char_count(doc: ExtractedDoc) -> int:
+    return sum(len(p or "") for p in doc.pages)
+
+
+def extract_pdf_for_voice_shelf(
+    *,
+    filename: str,
+    content: bytes,
+    book_label: str | None,
+    force_ocr: str,
+) -> ExtractedDoc:
+    """
+    Flux «cărți scanate»: încearcă text PDF; dacă e gol/scurt sau `force_ocr=true`, folosește OCR (Tesseract).
+    `force_ocr`: "auto" | "true" | "false".
+    """
+    label = (book_label or "").strip() or None
+    mode = (force_ocr or "auto").strip().lower()
+    if mode not in ("auto", "true", "false"):
+        mode = "auto"
+
+    base = extract_pdf(filename=filename, content=content)
+    text_n = _pdf_text_char_count(base)
+
+    use_ocr = mode == "true" or (mode == "auto" and text_n < PDF_MIN_TEXT_CHARS)
+    if mode == "false":
+        use_ocr = False
+
+    meta_base: dict[str, Any] = {"voice_shelf": True, "page_count": len(base.pages)}
+    if label:
+        meta_base["book_label"] = label
+
+    if not use_ocr:
+        if text_n < PDF_MIN_TEXT_CHARS:
+            raise ValueError(
+                "PDF-ul pare scanat (foarte puțin text extras). Bifează OCR sau setează force_ocr=true "
+                "și asigură-te că Tesseract + poppler sunt instalate."
+            )
+        return ExtractedDoc(
+            source=base.source,
+            source_type=base.source_type,
+            pages=base.pages,
+            meta=meta_base,
+        )
+
+    from app.ocr_pdf import ocr_pdf_pages
+
+    ocr_pages = ocr_pdf_pages(content=content)
+    if not ocr_pages:
+        raise ValueError("OCR: nu s-au putut citi paginile din PDF.")
+    ocr_joined = sum(len(p or "") for p in ocr_pages)
+    if ocr_joined < 8:
+        raise ValueError(
+            "OCR: text aproape gol. Verifică calitatea scanării, limba (OCR_LANG în .env) și că ai instalat "
+            "datele de antrenament tesseract pentru limbile folosite."
+        )
+    meta = dict(meta_base)
+    meta["ocr"] = True
+    meta["page_count"] = len(ocr_pages)
+    return ExtractedDoc(
+        source=base.source,
+        source_type="scanned_pdf",
+        pages=ocr_pages,
+        meta=meta,
     )
 
 
@@ -227,7 +296,7 @@ def docs_to_chunks(*, doc: ExtractedDoc) -> tuple[list[str], list[dict[str, Any]
                 "chunk": chunk_idx,
                 **(doc.meta or {}),
             }
-            if doc.source_type == "pdf":
+            if doc.source_type in ("pdf", "scanned_pdf"):
                 md["page"] = page_idx
             elif doc.source_type == "epub":
                 md["chapter"] = page_idx
