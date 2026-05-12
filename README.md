@@ -37,7 +37,7 @@ bash scripts/ingest.sh
 - Dacă vezi **`No module named 'app'`**: nu ești în rădăcina proiectului sau folosești venv-ul altui proiect (ex. `audi-vcds-master`). `pwd` trebuie să fie `…/second-brain-archivist` (conține `app/`, `scripts/`).
 - Chat fără OpenAI: în `.env` pune `LLM_MODE=disabled` — răspuns din fragmente RAG.
 - Arhivare: după `POST /archive/page`, `path_or_url` poate fi link Notion, cale Obsidian, sau URL relativ pentru download (Chrome).
-- Upload + „învață din documente”: `POST /ingest/files` (multipart) acceptă `.pdf`, `.epub`, `.txt`, `.md`, `.docx`. Pentru **PDF-uri scanate** folosește tab-ul **Cărți & voce** sau `POST /voice-library/ingest` (OCR cu **Tesseract** + **poppler** pe server). Pe macOS: `brew install tesseract tesseract-lang poppler`; Ubuntu: `apt install tesseract-ocr tesseract-ocr-ron tesseract-ocr-eng poppler-utils`. Opțional în `.env`: `OCR_LANG=ron+eng`, `OCR_DPI=200`.
+- Upload + „învață din documente”: `POST /ingest/files` (multipart) acceptă `.pdf`, `.epub`, `.txt`, `.md`, `.docx`. Pentru **PDF-uri scanate** folosește tab-ul **Cărți & voce** sau `POST /voice-library/ingest` (OCR cu **Tesseract** + **poppler**). **macOS:** `brew install tesseract tesseract-lang poppler`. Dacă mesajul „OCR indisponibil” persistă, repornește serverul din terminal (PATH cu `/opt/homebrew/bin`) sau setează `TESSERACT_CMD=/opt/homebrew/bin/tesseract` (Apple Silicon) / `/usr/local/bin/tesseract` (Intel) în `.env`. **Ubuntu:** `apt install tesseract-ocr tesseract-ocr-ron tesseract-ocr-eng poppler-utils`. Opțional: `OCR_LANG=ron+eng`, `OCR_DPI=200`.
 
 ## MCP (Cursor / Claude Desktop)
 

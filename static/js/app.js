@@ -988,7 +988,13 @@
       if (j.ok) {
         setStatus(
           "statusVoiceOcr",
-          "OCR disponibil (Tesseract " + (j.tesseract_version || "?") + ", limbi: " + (j.ocr_lang || "?") + ").",
+          "OCR disponibil: " +
+            (j.tesseract_path || "tesseract") +
+            " · versiune " +
+            (j.tesseract_version || "?") +
+            " · limbi " +
+            (j.ocr_lang || "?") +
+            ".",
           "ok"
         );
       } else {

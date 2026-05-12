@@ -3,11 +3,48 @@
 from __future__ import annotations
 
 import os
+import shutil
+from pathlib import Path
 from typing import Any
 
 # Limbi Tesseract: ex. "ron+eng" (vezi `tesseract --list-langs`).
 DEFAULT_OCR_LANG = (os.getenv("OCR_LANG") or "ron+eng").strip() or "ron+eng"
 DEFAULT_OCR_DPI = max(72, min(400, int(os.getenv("OCR_DPI") or "200")))
+
+
+def _resolve_tesseract_executable() -> str | None:
+    """
+    Găsește binarul `tesseract`. Pe macOS, procesele pornite din IDE adesea nu au
+    `/opt/homebrew/bin` în PATH — încercăm căi uzuale Homebrew + variabile `.env`.
+    """
+    explicit = (os.getenv("TESSERACT_CMD") or os.getenv("OCR_TESSERACT_CMD") or "").strip()
+    if explicit:
+        p = Path(expanded := os.path.expanduser(explicit))
+        if p.is_file():
+            return str(p.resolve())
+        if shutil.which(expanded):
+            return shutil.which(expanded)
+    w = shutil.which("tesseract")
+    if w:
+        return w
+    for candidate in (
+        "/opt/homebrew/bin/tesseract",
+        "/usr/local/bin/tesseract",
+        "/opt/local/bin/tesseract",
+    ):
+        if Path(candidate).is_file():
+            return candidate
+    return None
+
+
+def _configure_pytesseract() -> str | None:
+    """Setează `pytesseract.pytesseract.tesseract_cmd`; returnează calea folosită sau None."""
+    import pytesseract  # noqa: WPS433
+
+    path = _resolve_tesseract_executable()
+    if path:
+        pytesseract.pytesseract.tesseract_cmd = path
+    return path
 
 
 def ocr_backend_status() -> dict[str, Any]:
@@ -20,11 +57,28 @@ def ocr_backend_status() -> dict[str, Any]:
     try:
         import pytesseract
 
+        resolved = _configure_pytesseract()
+        if not resolved:
+            return {
+                "ok": False,
+                "python_ok": True,
+                "tesseract_ok": False,
+                "tesseract_path": None,
+                "detail": "Nu găsesc binarul «tesseract» (PATH gol sau Homebrew neinclus).",
+                "hint": (
+                    "macOS: `brew install tesseract tesseract-lang poppler`, apoi repornește serverul. "
+                    "Dacă tot nu merge, setează în .env: TESSERACT_CMD=/opt/homebrew/bin/tesseract "
+                    "(sau `/usr/local/bin/tesseract` pe Intel). Ubuntu: `apt install tesseract-ocr tesseract-ocr-ron "
+                    "tesseract-ocr-eng poppler-utils`."
+                ),
+            }
+
         ver = pytesseract.get_tesseract_version()
         return {
             "ok": True,
             "python_ok": True,
             "tesseract_ok": True,
+            "tesseract_path": resolved,
             "tesseract_version": str(ver),
             "ocr_lang": DEFAULT_OCR_LANG,
             "ocr_dpi": DEFAULT_OCR_DPI,
@@ -34,8 +88,12 @@ def ocr_backend_status() -> dict[str, Any]:
             "ok": False,
             "python_ok": True,
             "tesseract_ok": False,
+            "tesseract_path": _resolve_tesseract_executable(),
             "detail": str(e),
-            "hint": "Instalează pachetul «tesseract» (ex: brew install tesseract pe macOS, apt install tesseract-ocr pe Ubuntu).",
+            "hint": (
+                "Instalează Tesseract și poppler (vezi README). Pe macOS cu Homebrew: "
+                "`brew install tesseract tesseract-lang poppler`. Opțional: `TESSERACT_CMD=/opt/homebrew/bin/tesseract` în .env."
+            ),
         }
 
 
@@ -47,6 +105,7 @@ def ocr_pdf_pages(*, content: bytes, dpi: int | None = None, lang: str | None = 
     import pytesseract  # noqa: WPS433
     from pdf2image import convert_from_bytes  # noqa: WPS433
 
+    _configure_pytesseract()
     st = ocr_backend_status()
     if not st.get("ok"):
         raise RuntimeError(st.get("detail") or "OCR indisponibil")
