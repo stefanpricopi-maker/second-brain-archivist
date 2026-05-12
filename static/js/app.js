@@ -1078,6 +1078,29 @@
   }
 
   let voiceRec = null;
+  let voiceListenUserStopped = false;
+
+  function setVoiceListeningUi(on, label) {
+    const btn = el("btnVoiceMic");
+    const banner = el("voiceListenBanner");
+    const lab = el("voiceListenLabel");
+    if (btn) btn.classList.toggle("voice-mic-on", !!on);
+    if (banner) banner.hidden = !on;
+    if (lab && label) lab.textContent = label;
+  }
+
+  function voiceMicErrorMessage(code) {
+    const m = {
+      "not-allowed":
+        "Microfon refuzat. În Chrome: iconița din stânga URL-ului → setări site → Microfon: Permite. Folosește https:// sau localhost.",
+      "no-speech":
+        "Nu s-a detectat vorbire. Apasă din nou «Întreabă cu vocea» și vorbește imediat; apare banda albastră când ascult.",
+      "audio-capture": "Nu pot deschide microfonul (altă aplicație îl folosește sau lipsește dispozitivul).",
+      aborted: "",
+      network: "Eroare de rețea la recunoașterea vocală — încearcă din nou.",
+    };
+    return Object.prototype.hasOwnProperty.call(m, code) ? m[code] : "Mic: " + code;
+  }
 
   function speakVoiceAnswer() {
     const raw = el("outVoiceChat") ? el("outVoiceChat").textContent || "" : "";
@@ -1141,15 +1164,29 @@
   const btnVoiceMic = el("btnVoiceMic");
   if (btnVoiceMic) {
     btnVoiceMic.addEventListener("click", () => {
-      if (!supportsSpeechRecognition()) {
-        setStatus("statusVoiceChat", "Dictarea nu e disponibilă în acest browser.", "bad");
+      if (voiceRec) {
+        voiceListenUserStopped = true;
+        try {
+          voiceRec.abort();
+        } catch (_) {
+          /* ignore */
+        }
+        voiceRec = null;
+        setVoiceListeningUi(false);
+        setStatus("statusVoiceChat", "Ascultare oprită (apasă din nou pentru o nouă întrebare).", "");
         return;
       }
+      if (!supportsSpeechRecognition()) {
+        setStatus("statusVoiceChat", "Dictarea nu e disponibilă în acest browser (încearcă Chrome).", "bad");
+        return;
+      }
+      voiceListenUserStopped = false;
       const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
       voiceRec = new SR();
       voiceRec.lang = "ro-RO";
       voiceRec.interimResults = true;
       voiceRec.continuous = false;
+      voiceRec.maxAlternatives = 1;
       let finalText = "";
       voiceRec.onresult = (ev) => {
         let interim = "";
@@ -1159,15 +1196,68 @@
           else interim += txt;
         }
         const box = el("voiceQuestionText");
-        if (box) box.value = (finalText + " " + interim).trim();
+        const merged = (finalText + (interim ? (finalText ? " " : "") + interim : "")).trim();
+        if (box) box.value = merged;
+        setVoiceListeningUi(
+          true,
+          interim
+            ? "Te aud — transcriu în timp real…"
+            : finalText
+              ? "Am înregistrat textul; poți vorbi în continuare sau așteaptă trimiterea automată."
+              : "Aștept să vorbești…"
+        );
       };
-      voiceRec.onerror = (e) => setStatus("statusVoiceChat", "Mic: " + e.error, "bad");
-      voiceRec.onstart = () => setStatus("statusVoiceChat", "Ascult…");
+      voiceRec.onerror = (e) => {
+        setVoiceListeningUi(false);
+        voiceRec = null;
+        if (e.error === "aborted" && voiceListenUserStopped) {
+          voiceListenUserStopped = false;
+          return;
+        }
+        const msg = voiceMicErrorMessage(e.error);
+        if (msg) setStatus("statusVoiceChat", msg, e.error === "aborted" ? "" : "bad");
+      };
+      voiceRec.onstart = () => {
+        setVoiceListeningUi(true, "Microfon activ — vorbește; textul apare în câmp.");
+        setStatus("statusVoiceChat", "Ascult… (apasă «Stop» sau din nou pe microfon ca să oprești).", "ok");
+      };
+      voiceRec.onaudiostart = () => {
+        setVoiceListeningUi(true, "Canal audio pornit — vorbește acum.");
+      };
+      voiceRec.onsoundstart = () => {
+        setVoiceListeningUi(true, "Detectez sunet…");
+      };
+      voiceRec.onspeechstart = () => {
+        setVoiceListeningUi(true, "Te aud — transcriu…");
+      };
       voiceRec.onend = () => {
-        setStatus("statusVoiceChat", "Dictare oprită — trimit întrebarea.", "ok");
-        voiceAskChat();
+        setVoiceListeningUi(false);
+        voiceRec = null;
+        if (voiceListenUserStopped) {
+          voiceListenUserStopped = false;
+          setStatus("statusVoiceChat", "Ascultare oprită.", "");
+          return;
+        }
+        const q = (el("voiceQuestionText") && el("voiceQuestionText").value || "").trim();
+        if (q) {
+          setStatus("statusVoiceChat", "Trimit întrebarea…", "ok");
+          voiceAskChat();
+        } else {
+          setStatus(
+            "statusVoiceChat",
+            "Nu am primit text din microfon. Verifică permisiunea pentru microfon, vorbește după ce apare banda albastră, sau scrie întrebarea.",
+            "bad"
+          );
+        }
       };
-      voiceRec.start();
+      try {
+        voiceRec.start();
+      } catch (err) {
+        setVoiceListeningUi(false);
+        voiceRec = null;
+        const m = err && err.message ? err.message : String(err);
+        setStatus("statusVoiceChat", "Nu pot porni microfonul: " + m, "bad");
+      }
     });
   }
 
@@ -1177,7 +1267,18 @@
   const btnVoiceStopSpeak = el("btnVoiceStopSpeak");
   if (btnVoiceStopSpeak) {
     btnVoiceStopSpeak.addEventListener("click", () => {
+      voiceListenUserStopped = true;
+      if (voiceRec) {
+        try {
+          voiceRec.abort();
+        } catch (_) {
+          /* ignore */
+        }
+        voiceRec = null;
+        setVoiceListeningUi(false);
+      }
       if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+      setStatus("statusVoiceChat", "Stop (microfon și citire vocală).", "");
     });
   }
 

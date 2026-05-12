@@ -474,3 +474,58 @@ details.drive-advanced > summary::after {
 details.drive-advanced[open] > summary::after {
   content: " ▴";
 }
+
+/* Dictare vocală — tab Cărți & voce */
+.voice-listen-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: color-mix(in srgb, var(--accent) 14%, var(--card));
+  font-weight: 650;
+  font-size: 14px;
+  color: var(--text);
+}
+.voice-listen-banner[hidden] {
+  display: none !important;
+}
+.voice-listen-dot {
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent);
+  animation: voice-dot-pulse 1.1s ease-in-out infinite;
+}
+@keyframes voice-dot-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 40%, transparent);
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.85;
+    box-shadow: 0 0 0 10px transparent;
+    transform: scale(1.12);
+  }
+}
+#btnVoiceMic.voice-mic-on {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 55%, transparent);
+  border-color: var(--accent);
+  animation: voice-mic-glow 1.2s ease-in-out infinite;
+}
+@keyframes voice-mic-glow {
+  0%,
+  100% {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 45%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+}
