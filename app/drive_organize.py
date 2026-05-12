@@ -7,6 +7,7 @@ from typing import Any
 from openai import OpenAI
 
 from app import drive_google, drive_memory
+from app.drive_extension_paths import extension_destination_segments
 from app.drive_settings import DriveSettings
 
 
@@ -127,6 +128,7 @@ def propose_stage(
             "phase": "auto" if auto_phase else "bootstrap",
             "library_placements_total": n_hist,
             "min_auto": settings.min_auto,
+            "theme_paths_enabled": settings.theme_paths_enabled,
             "folder_options": folder_options,
             "files_in_stage_pending": [],
             "decisions": [],
@@ -197,11 +199,48 @@ def propose_stage(
                     }
                 )
 
+    if settings.theme_paths_enabled and decisions_out:
+        seen_folder_ids = {o["id"] for o in folder_options}
+        for d in decisions_out:
+            row = next((x for x in rows if x["file_id"] == d["file_id"]), None)
+            if not row:
+                continue
+            label, segs = extension_destination_segments(row["file_name"])
+            try:
+                leaf_id, created_names = drive_google.ensure_folder_path_under_root(
+                    service,
+                    library_root_folder_id=settings.library_root_folder_id,
+                    segments=segs,
+                )
+            except Exception as e:  # noqa: BLE001
+                d["theme_path_error"] = str(e)
+                d["theme_label"] = label
+                d["path_rule"] = "extension"
+                d["suggested_library_subpath"] = "/".join(segs)
+                continue
+            d["theme_label"] = label
+            d["path_rule"] = "extension"
+            d["suggested_library_subpath"] = "/".join(segs)
+            d["folders_created_for_path"] = created_names
+            d["suggested_target_folder_id"] = leaf_id
+            extra_reason = (
+                f"După extensie ({Path(row['file_name']).suffix or '(fără)'}): {label}. "
+                f"Cale în bibliotecă: {d['suggested_library_subpath']}."
+            )
+            if created_names:
+                extra_reason += f" Foldere noi create: {' → '.join(created_names)}."
+            prev = (d.get("reason") or "").strip()
+            d["reason"] = (prev + " " + extra_reason).strip() if prev else extra_reason
+            if leaf_id not in seen_folder_ids:
+                folder_options.append({"id": leaf_id, "name": d["suggested_library_subpath"]})
+                seen_folder_ids.add(leaf_id)
+
     return {
         "ok": True,
         "phase": "auto" if auto_phase else "bootstrap",
         "library_placements_total": n_hist,
         "min_auto": settings.min_auto,
+        "theme_paths_enabled": settings.theme_paths_enabled,
         "folder_options": folder_options,
         "files_in_stage_pending": [{"file_id": x["file_id"], "file_name": x["file_name"]} for x in rows],
         "previews": {x["file_id"]: x["preview"][:6000] for x in rows},
@@ -281,11 +320,13 @@ def copy_items(
             target_folder_name=tgt_name,
             copied_file_id=str(copied.get("id") or ""),
         )
+        cid = str(copied.get("id") or "")
         results.append(
             {
                 "ok": True,
                 "source_file_id": source_id,
                 "copied_file_id": copied.get("id"),
+                "copied_web_link": drive_google.drive_file_web_link(cid) if cid else None,
                 "target_folder_id": target_id,
                 "target_folder_name": tgt_name,
                 "name": fname,

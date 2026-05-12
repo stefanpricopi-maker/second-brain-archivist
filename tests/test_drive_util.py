@@ -34,3 +34,6 @@ def test_drive_status(client: TestClient) -> None:
     assert r.status_code == 200
     body = r.json()
     assert "enabled" in body
+    if body.get("enabled") is True:
+        assert body.get("ready_for_api") in (True, False)
+        assert "setup_hint" in body
