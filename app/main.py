@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import os
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -13,23 +15,33 @@ from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 
-from app.connectors import BrowserDownloadSink, ObsidianVaultSink, StubArchiveSink
+from app.connectors import BrowserDownloadSink, ObsidianVaultSink
+from app.connectors.notion_api import load_notion_sink_from_env
 from app.ingest import (
     docs_to_chunks,
     extract_docx,
+    extract_epub,
     extract_pdf,
     extract_text_like,
     save_upload,
 )
 from app import drive_google
+from app.drive_batch import batch_auto_organize_from_folder
 from app.drive_ingest import copy_drive_items_with_optional_rag
+from app.drive_wizard import WIZARD_AUTO_PLACE_MAX_IDS, auto_place_uploaded_file_ids
 from app.drive_organize import library_folder_options, propose_stage
 from app.drive_settings import load_drive_settings
 from app.drive_util import folder_id_from_drive_url
+from app.logging_setup import configure_logging, request_id_ctx
+from app.middleware.http_limits import RateLimitMiddleware, StaticCacheControlMiddleware
+from app.path_security import resolve_export_download
 from app.rag import LibraryRAGIndex
 from openai import OpenAI
 
 load_dotenv()
+configure_logging()
+
+log = logging.getLogger(__name__)
 
 LIBRARY_DIR = Path(os.getenv("LIBRARY_DIR", "./data/library")).resolve()
 UPLOADS_DIR = Path(os.getenv("UPLOADS_DIR", "./data/uploads")).resolve()
@@ -52,9 +64,12 @@ client = (
 
 
 def _archive_sink() -> Any:
+    # Local (Obsidian) are prioritate față de Notion dacă ambele sunt setate.
     if OBSIDIAN_VAULT:
         return ObsidianVaultSink(Path(OBSIDIAN_VAULT), default_subdir=OBSIDIAN_SUBDIR)
-    # Default: compatibil cu Chrome (download link). Stub rămâne pentru demo strict „fără disc”.
+    notion = load_notion_sink_from_env()
+    if notion is not None:
+        return notion
     return BrowserDownloadSink(EXPORTS_DIR)
 
 
@@ -65,7 +80,7 @@ app = FastAPI(
         {"name": "meta", "description": "Health și stare index."},
         {"name": "library", "description": "Căutare RAG în bibliotecă."},
         {"name": "chat", "description": "Întrebări cu context din cărți și notițe."},
-        {"name": "archive", "description": "Salvare sinteză ca fișier descărcabil (Chrome) sau Obsidian (opțional)."},
+        {"name": "archive", "description": "Salvare sinteză: Obsidian, Notion (token + parent), sau download Chrome."},
         {"name": "drive", "description": "Google Drive: Stage → bibliotecă (copiere, clasificare)."},
     ],
 )
@@ -80,11 +95,18 @@ if STATIC_DIR.exists():
 class RequestIdMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):  # type: ignore[override]
         rid = (request.headers.get("x-request-id") or "").strip() or str(uuid.uuid4())
-        response = await call_next(request)
-        response.headers["X-Request-ID"] = rid
-        return response
+        request.state.request_id = rid
+        token = request_id_ctx.set(rid)
+        try:
+            response = await call_next(request)
+            response.headers["X-Request-ID"] = rid
+            return response
+        finally:
+            request_id_ctx.reset(token)
 
 
+app.add_middleware(StaticCacheControlMiddleware, prefix="/static", max_age=3600)
+app.add_middleware(RateLimitMiddleware)
 app.add_middleware(RequestIdMiddleware)
 
 
@@ -95,6 +117,7 @@ def health() -> dict[str, str]:
 
 @app.get("/status", tags=["meta"])
 def status() -> dict[str, Any]:
+    notion_sink = load_notion_sink_from_env()
     return {
         "library_dir": str(LIBRARY_DIR),
         "library_dir_exists": LIBRARY_DIR.exists(),
@@ -103,8 +126,13 @@ def status() -> dict[str, Any]:
         "rag_chunks": rag.count(),
         "llm_mode": LLM_MODE,
         "archive": {
-            "mode": "obsidian" if OBSIDIAN_VAULT else "download",
+            "mode": (
+                "obsidian"
+                if OBSIDIAN_VAULT
+                else ("notion" if notion_sink is not None else "download")
+            ),
             "vault_set": bool(OBSIDIAN_VAULT),
+            "notion_configured": notion_sink is not None,
             "exports_dir": str(EXPORTS_DIR),
         },
         "drive": {
@@ -221,6 +249,8 @@ async def ingest_files(files: list[UploadFile] = File(...)) -> IngestResponse:
                 doc = extract_text_like(filename=name, content=raw, source_type=ext.lstrip("."))
             elif ext == ".docx":
                 doc = extract_docx(filename=name, content=raw)
+            elif ext == ".epub":
+                doc = extract_epub(filename=name, content=raw)
             elif ext == ".doc":
                 summaries.append(
                     {
@@ -294,11 +324,10 @@ def archive_page(req: ArchivePageRequest) -> dict[str, Any]:
 
 @app.get("/archive/files/{rel_path:path}", tags=["archive"])
 def archive_download(rel_path: str) -> FileResponse:
-    # Strict: nu permitem ieșire din EXPORTS_DIR.
-    base = EXPORTS_DIR.resolve()
-    target = (base / rel_path).resolve()
-    if base not in target.parents and target != base:
-        raise HTTPException(status_code=400, detail="Invalid path.")
+    try:
+        target = resolve_export_download(EXPORTS_DIR, rel_path)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid path.") from None
     if not target.is_file():
         raise HTTPException(status_code=404, detail="Not found.")
     return FileResponse(str(target), filename=target.name)
@@ -328,12 +357,25 @@ def drive_status() -> dict[str, Any]:
             "detail": "Setează GOOGLE_DRIVE_STAGE_FOLDER_ID și GOOGLE_DRIVE_LIBRARY_ROOT_FOLDER_ID.",
         }
     st = DRIVE_SETTINGS
+    stage_url = (os.getenv("GOOGLE_DRIVE_STAGE_FOLDER_URL") or "").strip()
+    client_ok = st.client_secret_path.is_file()
+    token_ok = st.token_path.is_file()
+    ready_for_api = client_ok and token_ok
+    hints: list[str] = []
+    if not client_ok:
+        hints.append(f"Lipsește client secret OAuth: {st.client_secret_path}")
+    if not token_ok:
+        hints.append("Rulează din rădăcina proiectului: python scripts/drive_auth.py")
     return {
         "enabled": True,
+        "ready_for_api": ready_for_api,
+        "setup_hint": " — ".join(hints) if hints else None,
+        "theme_paths_enabled": st.theme_paths_enabled,
         "stage_folder_id": st.stage_folder_id,
+        "stage_folder_url": stage_url or None,
         "library_root_folder_id": st.library_root_folder_id,
-        "client_secret_present": st.client_secret_path.is_file(),
-        "token_present": st.token_path.is_file(),
+        "client_secret_present": client_ok,
+        "token_present": token_ok,
         "memory_path": str(st.memory_path),
         "min_auto": st.min_auto,
     }
@@ -344,6 +386,73 @@ def drive_folders() -> dict[str, Any]:
     settings, svc = _drive_service_or_503()
     opts = library_folder_options(svc, settings.library_root_folder_id)
     return {"ok": True, "folder_options": opts}
+
+
+MAX_DRIVE_STAGE_UPLOAD = 32 * 1024 * 1024
+
+
+@app.post(
+    "/drive/stage/upload",
+    tags=["drive"],
+    summary="Încarcă fișiere în folderul Stage",
+    description=(
+        "Multipart: câmpul `files` (repetat). Un fișier per parte sau mai multe în aceeași cerere. "
+        "Maxim ~32 MiB per fișier. Răspuns: `files[]` cu `status`, `file_id`, linkuri."
+    ),
+)
+async def drive_stage_upload(files: list[UploadFile] = File(...)) -> dict[str, Any]:
+    """Încarcă unul sau mai multe fișiere în folderul Stage din Google Drive."""
+    t0 = time.perf_counter()
+    settings, svc = _drive_service_or_503()
+    summaries: list[dict[str, Any]] = []
+    for f in files:
+        name = (f.filename or "upload").strip() or "upload"
+        raw = await f.read()
+        if not raw:
+            summaries.append({"filename": name, "status": "error", "detail": "empty"})
+            continue
+        if len(raw) > MAX_DRIVE_STAGE_UPLOAD:
+            summaries.append(
+                {
+                    "filename": name,
+                    "status": "error",
+                    "detail": f"fișier prea mare (max {MAX_DRIVE_STAGE_UPLOAD // (1024 * 1024)} MiB)",
+                }
+            )
+            continue
+        mime = (f.content_type or "").strip() or None
+        try:
+            created = drive_google.upload_file_to_folder(
+                svc,
+                folder_id=settings.stage_folder_id,
+                filename=name,
+                content=raw,
+                mime_type=mime,
+            )
+        except Exception as e:  # noqa: BLE001
+            summaries.append({"filename": name, "status": "error", "detail": str(e)})
+            continue
+        fid = str(created.get("id") or "")
+        summaries.append(
+            {
+                "filename": name,
+                "status": "ok",
+                "file_id": fid,
+                "webViewLink": created.get("webViewLink"),
+                "web_link": drive_google.drive_file_web_link(fid) if fid else None,
+                "mimeType": created.get("mimeType"),
+            }
+        )
+    ok_n = sum(1 for x in summaries if x.get("status") == "ok")
+    err_n = len(summaries) - ok_n
+    log.info(
+        "drive.stage_upload parts=%s ok=%s err=%s ms=%.1f",
+        len(summaries),
+        ok_n,
+        err_n,
+        (time.perf_counter() - t0) * 1000,
+    )
+    return {"ok": True, "stage_folder_id": settings.stage_folder_id, "files": summaries}
 
 
 @app.post("/drive/propose", tags=["drive"])
@@ -383,6 +492,106 @@ def drive_copy(req: DriveCopyRequest) -> dict[str, Any]:
     )
 
 
+class DriveBatchAutoOrganizeRequest(BaseModel):
+    """Parcurge un folder Drive și copiază fiecare fișier în subfolderul bibliotecii după extensie."""
+
+    source_folder_id: str | None = Field(
+        default=None,
+        max_length=256,
+        description="ID folder sursă. Gol = folderul Stage din .env.",
+    )
+    recursive: bool = Field(
+        default=False,
+        description="Dacă true, include toate fișierele din subfoldere (BFS). Nu folosi pe rădăcina bibliotecii.",
+    )
+    max_files: int = Field(
+        default=150,
+        ge=1,
+        le=500,
+        description="Limită per cerere (evită timeout HTTP). Pentru mii de fișiere folosește scriptul CLI.",
+    )
+    ingest_to_rag: bool = Field(
+        default=False,
+        description="După fiecare copiere reușită, indexează în Chroma (mai lent).",
+    )
+    pause_sec: float = Field(
+        default=0.06,
+        ge=0.0,
+        le=2.0,
+        description="Pauză scurtă între fișiere (reduce presiunea pe cotele Drive API).",
+    )
+
+
+class WizardAutoPlaceRequest(BaseModel):
+    """După upload în Stage: plasare automată după extensie pentru lista de file_id."""
+
+    source_file_ids: list[str] = Field(
+        ...,
+        min_length=1,
+        max_length=WIZARD_AUTO_PLACE_MAX_IDS,
+        description=f"Lista de Google file_id din Stage (max {WIZARD_AUTO_PLACE_MAX_IDS} pe cerere; UI-ul face mai multe cereri).",
+    )
+    ingest_to_rag: bool = Field(
+        default=False,
+        description="După fiecare copiere reușită, indexează în Chroma.",
+    )
+
+
+@app.post(
+    "/drive/wizard/auto-place",
+    tags=["drive"],
+    summary="Plasare automată wizard (max ID-uri / cerere)",
+    description=(
+        f"Primește până la {WIZARD_AUTO_PLACE_MAX_IDS} `source_file_id` per cerere (clasificare după extensie, copiere în bibliotecă). "
+        "Interfața web împarte automat listele mai lungi în mai multe cereri. Pentru mii de fișiere dintr-un folder, "
+        "vezi `POST /drive/batch/auto-organize` sau scriptul `scripts/drive_batch_auto_organize.py`."
+    ),
+)
+def drive_wizard_auto_place(req: WizardAutoPlaceRequest) -> dict[str, Any]:
+    settings, svc = _drive_service_or_503()
+    t0 = time.perf_counter()
+    ids = list(dict.fromkeys([(x or "").strip() for x in req.source_file_ids if (x or "").strip()]))
+    if not ids:
+        raise HTTPException(status_code=422, detail="source_file_ids este gol după filtrare.")
+    out = auto_place_uploaded_file_ids(
+        svc,
+        settings,
+        source_file_ids=ids,
+        ingest_to_rag=req.ingest_to_rag,
+        rag=rag,
+    )
+    log.info(
+        "drive.wizard_auto_place ids=%s ms=%.1f ingest_rag=%s",
+        len(ids),
+        (time.perf_counter() - t0) * 1000,
+        req.ingest_to_rag,
+    )
+    return out
+
+
+@app.post("/drive/batch/auto-organize", tags=["drive"])
+def drive_batch_auto_organize(req: DriveBatchAutoOrganizeRequest) -> dict[str, Any]:
+    """
+    Flux fără pași manuali: citește fișierele din folder, pentru fiecare alege PDF/Documente/Afise/Powerpoint/Altele,
+    creează subfolderele lipsă sub bibliotecă și copiază. Omite fișierele deja înregistrate în memoria de copieri.
+    """
+    settings, svc = _drive_service_or_503()
+    src = (req.source_folder_id or "").strip() or settings.stage_folder_id
+    out = batch_auto_organize_from_folder(
+        svc,
+        settings,
+        source_folder_id=src,
+        recursive=req.recursive,
+        max_files=req.max_files,
+        ingest_to_rag=req.ingest_to_rag,
+        rag=rag,
+        pause_sec=req.pause_sec,
+    )
+    if not out.get("ok"):
+        raise HTTPException(status_code=400, detail=out.get("detail") or "batch failed")
+    return out
+
+
 @app.get("/drive/folder-id", tags=["drive"])
 def drive_folder_id(url: str) -> dict[str, str]:
     fid = folder_id_from_drive_url(url)
@@ -398,5 +607,5 @@ def root() -> dict[str, str]:
         "service": "second-brain-archivist",
         "docs": "/docs",
         "ui": "/static/index.html",
-        "hint": "POST /ingest/files, POST /chat, GET /search, POST /archive/page, GET /drive/status — vezi README.",
+        "hint": "POST /ingest/files, POST /chat, GET /search, POST /archive/page, GET /drive/status, POST /drive/wizard/auto-place, POST /drive/batch/auto-organize — vezi README.",
     }
