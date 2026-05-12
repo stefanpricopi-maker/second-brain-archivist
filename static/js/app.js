@@ -46,7 +46,7 @@
   }
 
   /* ——— Tab-uri ——— */
-  const tabIds = ["index", "search", "chat", "archive", "drive", "service"];
+  const tabIds = ["index", "search", "chat", "archive", "voice", "drive", "service"];
   function selectTab(name) {
     tabIds.forEach((id) => {
       const tab = el("tab-" + id);
@@ -60,6 +60,7 @@
     });
     history.replaceState(null, "", name === "index" ? "#" : "#" + name);
     if (name === "service") loadServicePanel();
+    if (name === "voice") loadVoicePanel();
   }
   tabIds.forEach((id) => {
     const t = el("tab-" + id);
@@ -970,6 +971,207 @@
       setStatus("statusChat", "Răspunsul nu e JSON valid.", "bad");
     }
   });
+
+  async function loadVoiceOcrStatus() {
+    try {
+      const r = await apiGet("/voice-library/ocr-status");
+      let j = null;
+      try {
+        j = JSON.parse(r.text);
+      } catch {
+        /* ignore */
+      }
+      if (!r.ok || !j) {
+        setStatus("statusVoiceOcr", "HTTP " + r.status + " la stare OCR.", "bad");
+        return;
+      }
+      if (j.ok) {
+        setStatus(
+          "statusVoiceOcr",
+          "OCR disponibil (Tesseract " + (j.tesseract_version || "?") + ", limbi: " + (j.ocr_lang || "?") + ").",
+          "ok"
+        );
+      } else {
+        setStatus(
+          "statusVoiceOcr",
+          "OCR indisponibil: " + (j.detail || "necunoscut") + (j.hint ? " — " + j.hint : ""),
+          "bad"
+        );
+      }
+    } catch (e) {
+      setStatus("statusVoiceOcr", "Eroare: " + e, "bad");
+    }
+  }
+
+  async function refreshVoiceSources() {
+    const sel = el("voiceSourceSelect");
+    if (!sel) return;
+    const cur = sel.value;
+    sel.innerHTML = "";
+    const opt0 = document.createElement("option");
+    opt0.value = "";
+    opt0.textContent = "— alege cartea (sursa din index) —";
+    sel.appendChild(opt0);
+    try {
+      const r = await apiGet("/voice-library/sources");
+      if (!r.ok) {
+        setStatus("statusVoiceIngest", "HTTP " + r.status + " la /voice-library/sources", "bad");
+        return;
+      }
+      const data = JSON.parse(r.text);
+      const items = data.sources || [];
+      items.forEach((row) => {
+        const o = document.createElement("option");
+        o.value = String(row.source || "");
+        const label = row.book_label || row.source || o.value;
+        const tag = row.scanned_pdf || row.voice_shelf ? " · scan" : "";
+        o.textContent = label + " (" + String(row.chunks || 0) + " frag.)" + tag;
+        sel.appendChild(o);
+      });
+      if (cur && Array.from(sel.options).some((x) => x.value === cur)) sel.value = cur;
+    } catch (e) {
+      setStatus("statusVoiceIngest", "Eroare la surse: " + e, "bad");
+    }
+  }
+
+  async function loadVoicePanel() {
+    await loadVoiceOcrStatus();
+    await refreshVoiceSources();
+  }
+
+  async function voiceAskChat() {
+    const srcEl = el("voiceSourceSelect");
+    const qEl = el("voiceQuestionText");
+    const source = srcEl && srcEl.value ? String(srcEl.value) : "";
+    const msg = qEl ? String(qEl.value || "").trim() : "";
+    if (!source) {
+      setStatus("statusVoiceChat", "Alege cartea din listă (metadata «source»).", "bad");
+      return;
+    }
+    if (!msg) {
+      setStatus("statusVoiceChat", "Scrie o întrebare sau folosește microfonul.", "bad");
+      return;
+    }
+    setStatus("statusVoiceChat", "Întreb…");
+    const out = el("outVoiceChat");
+    if (out) out.textContent = "";
+    try {
+      const r = await fetch(apiUrl("/chat"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: msg, k: 10, source: source }),
+      });
+      const t = await r.text();
+      if (out) out.textContent = t;
+      setStatus("statusVoiceChat", r.ok ? "OK" : "HTTP " + r.status, r.ok ? "ok" : "bad");
+    } catch (e) {
+      setStatus("statusVoiceChat", "Eroare: " + e, "bad");
+    }
+  }
+
+  let voiceRec = null;
+
+  function speakVoiceAnswer() {
+    const raw = el("outVoiceChat") ? el("outVoiceChat").textContent || "" : "";
+    if (!("speechSynthesis" in window)) {
+      setStatus("statusVoiceChat", "Sinteză vocală indisponibilă în acest browser.", "bad");
+      return;
+    }
+    try {
+      const j = JSON.parse(raw);
+      const ans = String(j.answer || "").trim();
+      if (!ans) {
+        setStatus("statusVoiceChat", "Nu am răspuns de citit.", "bad");
+        return;
+      }
+      window.speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(ans);
+      u.lang = "ro-RO";
+      u.rate = 1.02;
+      window.speechSynthesis.speak(u);
+    } catch {
+      setStatus("statusVoiceChat", "Răspunsul nu e JSON valid.", "bad");
+    }
+  }
+
+  const btnVoiceIngest = el("btnVoiceIngest");
+  if (btnVoiceIngest) {
+    btnVoiceIngest.addEventListener("click", async () => {
+      const inp = el("voicePdfInput");
+      const files = inp && inp.files;
+      if (!files || !files.length) {
+        setStatus("statusVoiceIngest", "Alege cel puțin un PDF.", "bad");
+        return;
+      }
+      setStatus("statusVoiceIngest", "Indexare…");
+      const out = el("outVoiceIngest");
+      if (out) out.textContent = "";
+      const fd = new FormData();
+      for (const f of files) fd.append("files", f);
+      const bl = el("voiceBookLabel");
+      const fo = el("voiceForceOcr");
+      fd.append("book_label", bl ? String(bl.value || "").trim() : "");
+      fd.append("force_ocr", fo && fo.value ? String(fo.value) : "auto");
+      try {
+        const r = await fetch(apiUrl("/voice-library/ingest"), { method: "POST", body: fd });
+        const t = await r.text();
+        if (out) out.textContent = t;
+        setStatus("statusVoiceIngest", r.ok ? "OK" : "HTTP " + r.status, r.ok ? "ok" : "bad");
+        if (r.ok) await refreshVoiceSources();
+      } catch (e) {
+        setStatus("statusVoiceIngest", "Eroare: " + e, "bad");
+      }
+    });
+  }
+
+  const btnVoiceRefresh = el("btnVoiceRefreshSources");
+  if (btnVoiceRefresh) btnVoiceRefresh.addEventListener("click", () => refreshVoiceSources());
+
+  const btnVoiceAsk = el("btnVoiceAsk");
+  if (btnVoiceAsk) btnVoiceAsk.addEventListener("click", () => voiceAskChat());
+
+  const btnVoiceMic = el("btnVoiceMic");
+  if (btnVoiceMic) {
+    btnVoiceMic.addEventListener("click", () => {
+      if (!supportsSpeechRecognition()) {
+        setStatus("statusVoiceChat", "Dictarea nu e disponibilă în acest browser.", "bad");
+        return;
+      }
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      voiceRec = new SR();
+      voiceRec.lang = "ro-RO";
+      voiceRec.interimResults = true;
+      voiceRec.continuous = false;
+      let finalText = "";
+      voiceRec.onresult = (ev) => {
+        let interim = "";
+        for (let i = ev.resultIndex; i < ev.results.length; i++) {
+          const txt = ev.results[i][0].transcript;
+          if (ev.results[i].isFinal) finalText += txt;
+          else interim += txt;
+        }
+        const box = el("voiceQuestionText");
+        if (box) box.value = (finalText + " " + interim).trim();
+      };
+      voiceRec.onerror = (e) => setStatus("statusVoiceChat", "Mic: " + e.error, "bad");
+      voiceRec.onstart = () => setStatus("statusVoiceChat", "Ascult…");
+      voiceRec.onend = () => {
+        setStatus("statusVoiceChat", "Dictare oprită — trimit întrebarea.", "ok");
+        voiceAskChat();
+      };
+      voiceRec.start();
+    });
+  }
+
+  const btnVoiceSpeak = el("btnVoiceSpeak");
+  if (btnVoiceSpeak) btnVoiceSpeak.addEventListener("click", () => speakVoiceAnswer());
+
+  const btnVoiceStopSpeak = el("btnVoiceStopSpeak");
+  if (btnVoiceStopSpeak) {
+    btnVoiceStopSpeak.addEventListener("click", () => {
+      if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+    });
+  }
 
   el("btnStopSpeak").addEventListener("click", () => {
     if ("speechSynthesis" in window) window.speechSynthesis.cancel();

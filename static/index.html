@@ -24,6 +24,7 @@
         <button type="button" role="tab" id="tab-search" aria-selected="false" aria-controls="panel-search">Căutare</button>
         <button type="button" role="tab" id="tab-chat" aria-selected="false" aria-controls="panel-chat">Chat</button>
         <button type="button" role="tab" id="tab-archive" aria-selected="false" aria-controls="panel-archive">Arhivă</button>
+        <button type="button" role="tab" id="tab-voice" aria-selected="false" aria-controls="panel-voice">Cărți &amp; voce</button>
         <button type="button" role="tab" id="tab-drive" aria-selected="false" aria-controls="panel-drive">Drive</button>
         <button type="button" role="tab" id="tab-service" aria-selected="false" aria-controls="panel-service">Serviciu</button>
       </nav>
@@ -93,6 +94,55 @@
           <div class="status" id="statusArchive"></div>
           <div id="archiveLinkRow" class="archive-link" hidden></div>
           <pre class="pre-box" id="outArchive"></pre>
+        </div>
+      </div>
+
+      <div id="panel-voice" class="panel" role="tabpanel" aria-labelledby="tab-voice" hidden>
+        <div class="card">
+          <h2>Cărți scanate &amp; întrebări vocale</h2>
+          <p class="lead">
+            Zonă separată de <strong>Google Drive</strong>: încarci PDF-uri scanate de tine, serverul le citește (OCR dacă e nevoie), le
+            pune în indexul local, apoi poți <strong>întreba cu vocea</strong> despre <strong>cartea aleasă</strong> din listă și
+            asculta răspunsul. Microfonul și citirea vocală folosesc browserul (Chrome recomandat).
+            API: <code>POST /voice-library/ingest</code>, <code>GET /voice-library/sources</code>, <code>POST /chat</code> cu <code>source</code>.
+          </p>
+          <div class="status" id="statusVoiceOcr" style="margin-bottom: 10px"></div>
+          <label class="field" for="voiceBookLabel">Denumire pe raft (opțional, pentru listă)</label>
+          <input id="voiceBookLabel" type="text" placeholder="Ex: Seneca — Scrisori către Lucilius" />
+          <div style="height: 10px"></div>
+          <label class="field" for="voiceForceOcr">OCR</label>
+          <select id="voiceForceOcr">
+            <option value="auto" selected>Automat (OCR dacă PDF-ul are foarte puțin text)</option>
+            <option value="true">Forțează OCR pe toate paginile</option>
+            <option value="false">Doar text din PDF (fără OCR)</option>
+          </select>
+          <div style="height: 10px"></div>
+          <input id="voicePdfInput" type="file" accept=".pdf,application/pdf" multiple />
+          <div style="height: 10px"></div>
+          <div class="row">
+            <button class="primary" type="button" id="btnVoiceIngest">Indexează PDF-urile</button>
+            <button type="button" id="btnVoiceRefreshSources">Reîmprospătează lista de cărți</button>
+          </div>
+          <div class="status" id="statusVoiceIngest"></div>
+          <pre class="pre-box" id="outVoiceIngest" style="max-height: 200px"></pre>
+        </div>
+
+        <div class="card" style="margin-top: 14px">
+          <h2>Întrebare (voce sau text) — o singură carte</h2>
+          <p class="lead">Alege sursa din index (aceeași denumire ca la încărcare). Răspunsul se bazează doar pe fragmentele din acea sursă.</p>
+          <label class="field" for="voiceSourceSelect">Cartea din bibliotecă</label>
+          <select id="voiceSourceSelect"></select>
+          <div style="height: 10px"></div>
+          <textarea id="voiceQuestionText" placeholder="Scrie întrebarea sau folosește microfonul…"></textarea>
+          <div style="height: 10px"></div>
+          <div class="row">
+            <button class="primary" type="button" id="btnVoiceAsk">Trimite întrebarea</button>
+            <button type="button" id="btnVoiceMic">Întreabă cu vocea</button>
+            <button type="button" id="btnVoiceSpeak">Citește răspunsul</button>
+            <button type="button" id="btnVoiceStopSpeak">Stop</button>
+          </div>
+          <div class="status" id="statusVoiceChat"></div>
+          <pre class="pre-box" id="outVoiceChat" style="max-height: 280px"></pre>
         </div>
       </div>
 
@@ -209,6 +259,6 @@
       </div>
     </div>
 
-    <script src="/static/js/app.js?v=6"></script>
+    <script src="/static/js/app.js?v=7"></script>
   </body>
 </html>
