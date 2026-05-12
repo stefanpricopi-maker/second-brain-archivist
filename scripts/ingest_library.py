@@ -12,6 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from app.ingest import docs_to_chunks, extract_epub  # noqa: E402
 from app.rag import LibraryRAGIndex  # noqa: E402
 
 load_dotenv()
@@ -102,17 +103,40 @@ def _index_pdfs(rag: LibraryRAGIndex) -> int:
     return n
 
 
+def _index_epubs(rag: LibraryRAGIndex) -> int:
+    n = 0
+    if not LIBRARY_DIR.exists():
+        return 0
+    for path in sorted([p for p in LIBRARY_DIR.rglob("*.epub") if p.is_file()]):
+        rel = path.relative_to(LIBRARY_DIR)
+        raw = path.read_bytes()
+        try:
+            doc = extract_epub(filename=str(rel), content=raw)
+        except Exception as e:
+            print(f"EPUB skip {rel}: {e}")
+            continue
+        texts, metas, ids = docs_to_chunks(doc=doc)
+        if not texts:
+            print(f"EPUB no text: {rel}")
+            continue
+        rag.add_texts(ids=ids, texts=texts, metadatas=metas)
+        n += len(ids)
+        print(f"Indexed EPUB {rel} ({doc.meta.get('chapter_count', '?')} chapters, {len(ids)} chunks)")
+    return n
+
+
 def main() -> None:
     rag = LibraryRAGIndex(persist_dir=VECTORSTORE_DIR)
     total = 0
     total += _index_pdfs(rag)
+    total += _index_epubs(rag)
     total += _index_text_files(rag, LIBRARY_DIR, "library_txt", ["*.md", "*.txt"])
     total += _index_text_files(rag, PUBLIC_NOTES_DIR, "public_note", ["*.md"])
 
     if total == 0:
         raise SystemExit(
-            f"No documents found. Add PDF/MD/TXT under {LIBRARY_DIR} "
-            f"and/or markdown under {PUBLIC_NOTES_DIR}. EPUB: planned (ebooklib)."
+            f"No documents found. Add PDF/EPUB/MD/TXT under {LIBRARY_DIR} "
+            f"and/or markdown under {PUBLIC_NOTES_DIR}."
         )
     print(f"Done. Indexed ~{total} chunks into {VECTORSTORE_DIR}")
 

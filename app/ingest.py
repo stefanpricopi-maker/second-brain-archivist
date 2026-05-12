@@ -74,6 +74,70 @@ def extract_docx(*, filename: str, content: bytes) -> ExtractedDoc:
     )
 
 
+def _epub_html_to_text(html: str) -> str:
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+    return soup.get_text("\n", strip=True)
+
+
+def extract_epub(*, filename: str, content: bytes) -> ExtractedDoc:
+    import ebooklib
+    from ebooklib import epub
+
+    book = epub.read_epub(io.BytesIO(content))
+    dc_title = book.get_metadata("DC", "title")
+    title = (dc_title[0][0] if dc_title else None) or filename
+    dc_lang = book.get_metadata("DC", "language")
+    lang = dc_lang[0][0] if dc_lang else None
+    dc_creators = book.get_metadata("DC", "creator")
+    author_list = [c[0] for c in dc_creators] if dc_creators else []
+
+    pages: list[str] = []
+
+    def push_item(item: Any) -> None:
+        if item is None or item.get_type() != ebooklib.ITEM_DOCUMENT:
+            return
+        name_lower = (item.get_name() or "").lower()
+        if name_lower.endswith("nav.xhtml") or name_lower.endswith("/nav.xhtml"):
+            return
+        try:
+            raw = item.get_content()
+        except Exception:
+            return
+        if not raw:
+            return
+        blob = raw if isinstance(raw, bytes) else str(raw).encode("utf-8", errors="replace")
+        html = blob.decode("utf-8", errors="replace")
+        text = _epub_html_to_text(html)
+        if len(text.strip()) < 8:
+            return
+        pages.append(text)
+
+    for ref in book.spine:
+        item_id = ref[0] if isinstance(ref, tuple) else ref
+        push_item(book.get_item_with_id(item_id))
+
+    if not pages:
+        for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
+            push_item(item)
+
+    meta: dict[str, Any] = {"title": title, "chapter_count": len(pages)}
+    if lang:
+        meta["language"] = lang
+    if author_list:
+        meta["authors"] = ", ".join(author_list)
+
+    return ExtractedDoc(
+        source=filename,
+        source_type="epub",
+        pages=pages,
+        meta=meta,
+    )
+
+
 def save_upload(*, uploads_dir: Path, filename: str, content: bytes) -> Path:
     uploads_dir.mkdir(parents=True, exist_ok=True)
     ts = time.strftime("%Y%m%d-%H%M%S")
@@ -117,6 +181,8 @@ def ingest_bytes_into_rag(
         elif mt.startswith("application/vnd.google-apps."):
             # Fișiere exportate deja ca text/csv de către Drive API.
             doc = extract_text_like(filename=name, content=content, source_type="txt")
+        elif ext == ".epub" or mt in ("application/epub+zip", "application/epub"):
+            doc = extract_epub(filename=name, content=content)
         elif ext == "" and len(content) >= 4 and content[:4] == b"%PDF":
             doc = extract_pdf(filename=name or "document.pdf", content=content)
         else:
@@ -155,13 +221,16 @@ def docs_to_chunks(*, doc: ExtractedDoc) -> tuple[list[str], list[dict[str, Any]
             key = f"{doc.source}|p{page_idx}|c{chunk_idx}|{doc.source_type}"
             ids.append(_stable_id(key))
             texts.append(chunk)
-            md = {
+            md: dict[str, Any] = {
                 "source": doc.source,
                 "source_type": doc.source_type,
-                "page": page_idx if doc.source_type == "pdf" else None,
                 "chunk": chunk_idx,
                 **(doc.meta or {}),
             }
+            if doc.source_type == "pdf":
+                md["page"] = page_idx
+            elif doc.source_type == "epub":
+                md["chapter"] = page_idx
             metas.append({k: v for k, v in md.items() if v is not None})
     return texts, metas, ids
 
