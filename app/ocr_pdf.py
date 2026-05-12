@@ -13,6 +13,31 @@ DEFAULT_OCR_LANG = (os.getenv("OCR_LANG") or "ron").strip() or "ron"
 DEFAULT_OCR_DPI = max(72, min(400, int(os.getenv("OCR_DPI") or "200")))
 
 
+def _resolve_poppler_bin_dir() -> str | None:
+    """
+    Directorul care conține `pdftoppm` (pdf2image îl folosește pentru PDF→PNG).
+    Pe macOS, același caz ca la Tesseract: IDE fără `/opt/homebrew/bin` în PATH.
+    """
+    explicit = (os.getenv("POPPLER_PATH") or os.getenv("POPPLER_BIN") or "").strip()
+    if explicit:
+        exp = os.path.expanduser(explicit)
+        p = Path(exp)
+        if p.is_dir() and (p / "pdftoppm").is_file():
+            return str(p.resolve())
+        if p.is_file() and p.name == "pdftoppm":
+            return str(p.parent.resolve())
+        w = shutil.which(exp)
+        if w and Path(w).name == "pdftoppm":
+            return str(Path(w).parent.resolve())
+    w = shutil.which("pdftoppm")
+    if w:
+        return str(Path(w).parent.resolve())
+    for d in ("/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"):
+        if (Path(d) / "pdftoppm").is_file():
+            return d
+    return None
+
+
 def _resolve_tesseract_executable() -> str | None:
     """
     Găsește binarul `tesseract`. Pe macOS, procesele pornite din IDE adesea nu au
@@ -75,12 +100,32 @@ def ocr_backend_status() -> dict[str, Any]:
             }
 
         ver = pytesseract.get_tesseract_version()
+        poppler_dir = _resolve_poppler_bin_dir()
+        if not poppler_dir:
+            return {
+                "ok": False,
+                "python_ok": True,
+                "tesseract_ok": True,
+                "tesseract_path": resolved,
+                "tesseract_version": str(ver),
+                "poppler_ok": False,
+                "poppler_path": None,
+                "ocr_lang": DEFAULT_OCR_LANG,
+                "ocr_dpi": DEFAULT_OCR_DPI,
+                "detail": "Nu găsesc «pdftoppm» (Poppler) — pdf2image nu poate citi PDF-ul.",
+                "hint": (
+                    "macOS: `brew install poppler` (deja instalat la tine = cale lipsă din PATH). "
+                    "Pune în `.env`: `POPPLER_PATH=/opt/homebrew/bin` (Apple Silicon) sau `/usr/local/bin` (Intel), apoi repornește serverul."
+                ),
+            }
         return {
             "ok": True,
             "python_ok": True,
             "tesseract_ok": True,
             "tesseract_path": resolved,
             "tesseract_version": str(ver),
+            "poppler_ok": True,
+            "poppler_path": poppler_dir,
             "ocr_lang": DEFAULT_OCR_LANG,
             "ocr_dpi": DEFAULT_OCR_DPI,
         }
@@ -113,7 +158,11 @@ def ocr_pdf_pages(*, content: bytes, dpi: int | None = None, lang: str | None = 
 
     dpi_use = int(dpi or DEFAULT_OCR_DPI)
     lang_use = (lang or DEFAULT_OCR_LANG).strip() or DEFAULT_OCR_LANG
-    images = convert_from_bytes(content, dpi=dpi_use)
+    poppler_dir = _resolve_poppler_bin_dir()
+    kwargs: dict[str, Any] = {"dpi": dpi_use}
+    if poppler_dir:
+        kwargs["poppler_path"] = poppler_dir
+    images = convert_from_bytes(content, **kwargs)
     pages: list[str] = []
     for im in images:
         try:

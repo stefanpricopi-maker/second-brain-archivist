@@ -994,6 +994,8 @@
             (j.tesseract_version || "?") +
             " · limbi " +
             (j.ocr_lang || "?") +
+            " · poppler " +
+            (j.poppler_path || "?") +
             ".",
           "ok"
         );
