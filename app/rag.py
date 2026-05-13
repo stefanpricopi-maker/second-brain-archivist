@@ -24,7 +24,25 @@ class LibraryRAGIndex:
         )
 
     def add_texts(self, *, ids: list[str], texts: list[str], metadatas: list[dict[str, Any]]):
-        self.collection.add(ids=ids, documents=texts, metadatas=metadatas)
+        """Upsert: re-indexarea aceluiași `id` înlocuiește documentul (re-ingest cu același id stabil)."""
+        self.collection.upsert(ids=ids, documents=texts, metadatas=metadatas)
+
+    def get_bytes_sha_for_source(self, *, source: str) -> str | None:
+        """Primul `bytes_sha256` găsit pentru sursă (toate fragmentele din același ingest îl împărtășesc)."""
+        src = (source or "").strip()
+        if not src:
+            return None
+        got = self.collection.get(
+            where={"source": {"$eq": src}},
+            limit=1,
+            include=["metadatas"],
+        )
+        metas = got.get("metadatas") or []
+        if not metas:
+            return None
+        md = metas[0] or {}
+        v = md.get("bytes_sha256")
+        return str(v).strip() if v else None
 
     def query(self, query: str, k: int, where: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         if self.collection.count() == 0:
@@ -73,10 +91,29 @@ class LibraryRAGIndex:
             bl = md.get("book_label")
             if isinstance(bl, str) and bl.strip() and not row.get("book_label"):
                 row["book_label"] = bl.strip()
-            if md.get("source_type") == "scanned_pdf" or md.get("ocr"):
+            if md.get("source_type") == "scanned_pdf" or md.get("ocr") or md.get("scan_derived"):
                 row["scanned_pdf"] = True
             if md.get("voice_shelf"):
                 row["voice_shelf"] = True
         out = list(agg.values())
         out.sort(key=lambda x: (-int(x.get("chunks") or 0), str(x.get("source") or "")))
         return out
+
+    def delete_by_source(self, *, source: str) -> int:
+        """Șterge toate fragmentele cu metadata `source` egală (exact) cu `source`. Returnează numărul de ID-uri șterse."""
+        src = (source or "").strip()
+        if not src:
+            return 0
+        total = 0
+        where: dict[str, Any] = {"source": {"$eq": src}}
+        batch_limit = 2000
+        while True:
+            batch = self.collection.get(where=where, limit=batch_limit, include=[])
+            ids = batch.get("ids") or []
+            if not ids:
+                break
+            self.collection.delete(ids=ids)
+            total += len(ids)
+            if len(ids) < batch_limit:
+                break
+        return total

@@ -22,6 +22,40 @@ cp .env.example .env
 mkdir -p data/library data/vectorstore
 # pune PDF/MD/TXT în data/library/ (și/sau knowledge/public/)
 python scripts/ingest_library.py
+# Opțional HTTPS local (dictare / site „sigur”): vezi secțiunea de mai jos, apoi:
+bash scripts/run_dev.sh
+```
+
+**HTTPS local (recomandat — [mkcert](https://github.com/FiloSottile/mkcert)):** instalezi o dată CA-ul local, generezi certificatul, apoi `run_dev.sh` pornește cu TLS dacă găsește `data/tls/dev.key` + `data/tls/dev.crt`:
+
+```bash
+brew install mkcert nss          # macOS; pe Linux vezi repo-ul mkcert
+mkcert -install                  # o dată: adaugă CA în keychain / trust store
+bash scripts/generate_dev_tls_mkcert.sh
+bash scripts/run_dev.sh
+# UI: https://127.0.0.1:8090/ — fără „Not secure” în mod normal
+```
+
+**Fallback fără mkcert** (openssl, self-signed — Brave poate afișa avertisment):
+
+```bash
+bash scripts/generate_dev_tls.sh
+bash scripts/run_dev.sh
+```
+
+Fără fișierele din `data/tls/`, serverul rămâne pe **HTTP** ca înainte.
+
+**Alternativă fără `run_dev.sh`** (manual; înlocuiește căile TLS dacă le-ai generate altundeva):
+
+```bash
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8090 \
+  --ssl-keyfile data/tls/dev.key \
+  --ssl-certfile data/tls/dev.crt
+```
+
+Fără TLS (doar HTTP):
+
+```bash
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8090
 ```
 
@@ -32,12 +66,14 @@ bash scripts/run_dev.sh
 bash scripts/ingest.sh
 ```
 
-- API: `http://127.0.0.1:8090/docs`
-- UI: `http://127.0.0.1:8090/static/index.html` — tab-uri (Index, Căutare, Chat, Arhivă, **Cărți & voce**, Drive, Serviciu). **Cărți & voce** (separat de Drive): PDF scanat → OCR local (Tesseract) → index RAG; alegi cartea din listă; **întrebare vocală** + **răspuns citit** în browser (Chrome). **Drive** — wizard în 3 pași: conexiune → încărcare în Stage (`POST /drive/stage/upload`) → **plasare automată** (`POST /drive/wizard/auto-place`, max. 120 ID-uri/cerere; UI împarte automat listele mai lungi în mai multe cereri), după extensie; la nevoie, listă + dropdown pentru remedieri manuale. „Drive avansat” pentru bulk din Stage.
+- API: `https://127.0.0.1:8090/docs` dacă ai generat TLS (vezi mai sus), altfel `http://127.0.0.1:8090/docs`
+- UI: `https://127.0.0.1:8090/` (redirecționează la interfață) sau `…/static/index.html` — tab-uri (Index, Căutare, Chat, Arhivă, **Cărți & voce**, Drive, Serviciu). Cu **mkcert** certificatul e de încredere local; cu **openssl** (self-signed) Brave poate afișa „Not secure”. JSON de discovery: `GET /meta`.
+- **Cărți & voce** (separat de Drive): PDF scanat → OCR local (Tesseract) → index RAG; alegi cartea din listă; **întrebare vocală** + **răspuns citit** în browser. **Drive** — wizard în 3 pași: conexiune → încărcare în Stage (`POST /drive/stage/upload`) → **plasare automată** (`POST /drive/wizard/auto-place`, max. 120 ID-uri/cerere; UI împarte automat listele mai lungi în mai multe cereri), după extensie; la nevoie, listă + dropdown pentru remedieri manuale. „Drive avansat” pentru bulk din Stage.
 - Dacă vezi **`No module named 'app'`**: nu ești în rădăcina proiectului sau folosești venv-ul altui proiect (ex. `audi-vcds-master`). `pwd` trebuie să fie `…/second-brain-archivist` (conține `app/`, `scripts/`).
 - Chat fără OpenAI: în `.env` pune `LLM_MODE=disabled` — răspuns din fragmente RAG.
 - Arhivare: după `POST /archive/page`, `path_or_url` poate fi link Notion, cale Obsidian, sau URL relativ pentru download (Chrome).
-- Upload + „învață din documente”: `POST /ingest/files` (multipart) acceptă `.pdf`, `.epub`, `.txt`, `.md`, `.docx`. Pentru **PDF-uri scanate** folosește tab-ul **Cărți & voce** sau `POST /voice-library/ingest` (OCR cu **Tesseract** + **poppler**). **macOS:** `brew install tesseract tesseract-lang poppler` — `tesseract-lang` aduce limbi suplimentare, inclusiv **română (`ron`)**. OCR implicit e **română** (`OCR_LANG=ron` în cod); pentru pagini cu mult engleză pune în `.env` `OCR_LANG=ron+eng`. Dacă „OCR indisponibil” persistă, repornește serverul din terminal sau setează în `.env` căile Homebrew (IDE-ul poate avea PATH restrâns): `TESSERACT_CMD=/opt/homebrew/bin/tesseract` și `POPPLER_PATH=/opt/homebrew/bin` (Apple Silicon; pe Intel adesea `/usr/local/bin`). **Ubuntu:** `apt install tesseract-ocr tesseract-ocr-ron poppler-utils` (+ opțional `tesseract-ocr-eng`). Opțional: `OCR_DPI=200`.
+- Upload + „învață din documente”: `POST /ingest/files` (multipart) acceptă `.pdf`, `.epub`, `.txt`, `.md`, `.docx`. Pentru **PDF-uri scanate** folosește tab-ul **Cărți & voce** sau `POST /voice-library/ingest` (OCR cu **Tesseract** + **poppler**). **macOS:** `brew install tesseract tesseract-lang poppler` — `tesseract-lang` aduce limbi suplimentare, inclusiv **română (`ron`)**. OCR implicit e **română** (`OCR_LANG=ron` în cod); pentru pagini cu mult engleză pune în `.env` `OCR_LANG=ron+eng`. Dacă „OCR indisponibil” persistă, repornește serverul din terminal sau setează în `.env` căile Homebrew (IDE-ul poate avea PATH restrâns): `TESSERACT_CMD=/opt/homebrew/bin/tesseract` și `POPPLER_PATH=/opt/homebrew/bin` (Apple Silicon; pe Intel adesea `/usr/local/bin`). **Ubuntu:** `apt install tesseract-ocr tesseract-ocr-ron poppler-utils` (+ opțional `tesseract-ocr-eng`). Opțional: `OCR_DPI` (implicit **240**, max 400), `OCR_LANG=ron+eng`, `OCR_IMAGE_PREPROCESS=0` pentru a opri autocontrastul pe imagine, `OCR_TESSERACT_CONFIG=--oem 3 --psm 6` pentru modul de segmentare Tesseract (încearcă **psm 6** pe text continuu; **psm 3** rămâne implicit dacă variabila e goală). Pentru **PDF scanat**, chunk-urile RAG sunt implicit **mai scurte** (~1100 caractere) decât la PDF digital — vezi `RAG_CHUNK_CHARS_OCR` / `RAG_CHUNK_OVERLAP_OCR` în `.env.example`. **OCRmyPDF** e inclus în `requirements.txt` (`pip install -r requirements.txt`); pe **macOS** instalează și binarele: `brew install ghostscript qpdf` (sau `brew install ocrmypdf` care le trage). Pe **Ubuntu**: `apt install ghostscript qpdf`. Dacă în UI vezi `ocrmypdf_available: false`, repornește serverul din același venv sau setează `OCRMYPDF_CMD` către `…/venv/bin/ocrmypdf`. Activează pasul cu `OCR_USE_OCRMYPDF=1` în `.env` — vezi [documentația OCRmyPDF](https://ocrmypdf.readthedocs.io/). **Chunking pe propoziții** pentru scanate / strat ocrmypdf: implicit `RAG_CHUNK_BY_SENTENCES=1`. După schimbarea setărilor OCR, **re-indexează** cartea.
+- **Ștergere din RAG:** `DELETE /voice-library/index?source=<nume_exact.pdf>` — șterge toate fragmentele cu acel `metadata.source` (aceeași valoare ca în dropdown). Răspuns JSON: `deleted_chunks`, `rag_chunks`.
 
 ## MCP (Cursor / Claude Desktop)
 

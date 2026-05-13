@@ -8,8 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
-from fastapi.responses import FileResponse
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -17,15 +17,8 @@ from starlette.requests import Request
 
 from app.connectors import BrowserDownloadSink, ObsidianVaultSink
 from app.connectors.notion_api import load_notion_sink_from_env
-from app.ingest import (
-    docs_to_chunks,
-    extract_docx,
-    extract_epub,
-    extract_pdf,
-    extract_pdf_for_voice_shelf,
-    extract_text_like,
-    save_upload,
-)
+from app import ingest_jobs
+from app.ingest_service import ingest_main_files, ingest_voice_pdf_batch
 from app import drive_google
 from app.drive_batch import batch_auto_organize_from_folder
 from app.drive_ingest import copy_drive_items_with_optional_rag
@@ -37,7 +30,15 @@ from app.logging_setup import configure_logging, request_id_ctx
 from app.middleware.http_limits import RateLimitMiddleware, StaticCacheControlMiddleware
 from app.ocr_pdf import ocr_backend_status
 from app.rag import LibraryRAGIndex
-from openai import OpenAI
+from openai import (
+    APIError,
+    APIStatusError,
+    APITimeoutError,
+    AuthenticationError,
+    BadRequestError,
+    OpenAI,
+    RateLimitError,
+)
 
 load_dotenv()
 configure_logging()
@@ -62,6 +63,53 @@ client = (
     if LLM_MODE == "openai" and _has_openai_key
     else None
 )
+
+
+def openai_chat_error_to_http(exc: BaseException) -> HTTPException:
+    """
+    Traduce erorile SDK OpenAI (chat) în HTTP cu mesaj lizibil în română,
+    fără a expune corpul JSON complet de la furnizor (ex. 429 insufficient_quota).
+    """
+    quota_msg = (
+        "OpenAI a respins cererea: limită de cotă sau de frecvență (HTTP 429). "
+        "Verifică planul și facturarea: https://platform.openai.com/account/billing — "
+        "sau pune în `.env` LLM_MODE=disabled și repornește serverul pentru răspunsuri locale "
+        "din fragmente RAG (fără sinteză LLM)."
+    )
+    if isinstance(exc, AuthenticationError):
+        return HTTPException(
+            status_code=401,
+            detail="OpenAI: cheie API invalidă sau refuzată. Verifică OPENAI_API_KEY în `.env`.",
+        )
+    if isinstance(exc, APITimeoutError):
+        return HTTPException(
+            status_code=504,
+            detail="OpenAI: timeout la apel. Încearcă din nou sau verifică rețeaua.",
+        )
+    if isinstance(exc, RateLimitError):
+        return HTTPException(status_code=503, detail=quota_msg)
+    if isinstance(exc, BadRequestError):
+        brief = (getattr(exc, "message", None) or str(exc))[:400]
+        return HTTPException(
+            status_code=400,
+            detail=f"OpenAI: cerere invalidă. {brief}",
+        )
+    if isinstance(exc, APIStatusError):
+        status = int(getattr(exc, "status_code", 0) or 0)
+        body = getattr(exc, "body", None)
+        inner_code = None
+        if isinstance(body, dict):
+            err = body.get("error")
+            if isinstance(err, dict):
+                inner_code = err.get("code") or err.get("type")
+        if status == 429 or inner_code == "insufficient_quota":
+            return HTTPException(status_code=503, detail=quota_msg)
+        brief = (getattr(exc, "message", None) or str(exc))[:450]
+        return HTTPException(status_code=502, detail=f"OpenAI API ({status}): {brief}")
+    if isinstance(exc, APIError):
+        brief = (getattr(exc, "message", None) or str(exc))[:450]
+        return HTTPException(status_code=502, detail=f"OpenAI: {brief}")
+    return HTTPException(status_code=502, detail=f"Eroare LLM: {exc}")
 
 
 def _archive_sink() -> Any:
@@ -139,6 +187,7 @@ def status() -> dict[str, Any]:
         "vectorstore_dir": str(VECTORSTORE_DIR),
         "rag_chunks": rag.count(),
         "llm_mode": LLM_MODE,
+        "openai_key_configured": _has_openai_key,
         "archive": {
             "mode": (
                 "obsidian"
@@ -198,35 +247,170 @@ class IngestResponse(BaseModel):
     files: list[dict[str, Any]]
     added_chunks: int
     rag_chunks: int
+    dry_run: bool = False
 
 
-def _fallback_answer(query: str, chunks: list[dict[str, Any]], *, source: str | None = None) -> str:
+def _squish_ws(text: str) -> str:
+    return " ".join((text or "").split())
+
+
+def _truncate_words(text: str, max_chars: int) -> str:
+    t = _squish_ws(text).strip()
+    if not t:
+        return ""
+    if len(t) <= max_chars:
+        return t
+    cut = t[: max_chars - 3].rstrip()
+    if " " in cut:
+        cut = cut.rsplit(" ", 1)[0]
+    return cut.strip() + "..."
+
+
+def _chunk_has_query_overlap(raw: str, q_tokens: list[str]) -> bool:
+    """True dacă textul fragmentului conține explicit un termen din întrebare (nu doar similaritate vectorială)."""
+    if not q_tokens:
+        return True
+    lower = _squish_ws(raw).lower()
+    return any(tok in lower for tok in q_tokens)
+
+
+def _query_tokens_for_fallback(query: str) -> list[str]:
+    """Termeni din întrebare pentru potrivire lexicală în modul fără LLM (inclusiv cuvinte scurte utile în RO)."""
+    stop = frozenset(
+        """
+        și sau fie ca la de cu pe în un o unei unul oarecare ce care cum când cât câte câți câteva
+        este sunt era erau fi fost fiind am ai au aș vei vom vor fi eu tu el ea noi voi ei ele
+        a ai ale al lui ei lor să te mă îți îmi ne miți mi vă ne-ți ne-am
+        da nu da nu ok ba deci doar tot foarte mult mai mult mai puțin
+        the and or of to in is are was were be been being
+        """.split()
+    )
+    out: list[str] = []
+    for w in _squish_ws(query).lower().split():
+        w = w.strip(".,?!:;\"'«»()[]{}—–-")
+        if len(w) < 2 or w in stop:
+            continue
+        if w not in out:
+            out.append(w)
+        if len(out) >= 14:
+            break
+    return out
+
+
+def _pick_excerpt(raw: str, query_tokens: list[str], *, max_chars: int) -> str:
+    """Extras scurt; dacă întrebarea conține termeni lungi, preferă fereastra din jurul unui potrivit."""
+    t = _squish_ws(raw)
+    if not t:
+        return ""
+    lower = t.lower()
+    pad = min(100, max_chars + 35)
+    for tok in query_tokens:
+        if tok in lower:
+            idx = lower.find(tok)
+            start = max(0, idx - min(50, max_chars // 2))
+            window = t[start : start + max_chars + pad]
+            return _truncate_words(window, max_chars)
+    return _truncate_words(t, max_chars)
+
+
+def _chunk_readability(text: str) -> float:
+    """Scor 0–1 pentru text OCR: favorizează propoziții cu litere și cuvinte medii/lungi, penalizează zgomot."""
+    t = _squish_ws(text or "")
+    n = len(t)
+    if n < 14:
+        return 0.06
+    letters = sum(1 for c in t if c.isalpha())
+    lr = letters / max(n, 1)
+    score = lr
+    if lr < 0.38:
+        score *= 0.45
+    elif lr < 0.48:
+        score *= 0.72
+    words = t.split()
+    nw = len(words)
+    if nw < 2:
+        return 0.05
+    singles = sum(1 for w in words if len(w) == 1)
+    awl = sum(len(w) for w in words) / nw
+    if nw >= 9 and singles / nw > 0.14:
+        score *= 0.35
+    if awl < 2.75 and nw >= 10:
+        score *= 0.48
+    if t.count("|") >= 4:
+        score *= 0.55
+    if sum(1 for c in t if c.isdigit()) / n > 0.2:
+        score *= 0.62
+    return float(min(1.0, max(0.0, score)))
+
+
+def _sort_chunks_for_fallback(chunks: list[dict[str, Any]], q_tokens: list[str]) -> list[dict[str, Any]]:
+    """Prioritizează fragmentele care conțin termeni din întrebare, apoi lizibilitatea (OCR)."""
+
+    def key(ch: dict[str, Any]) -> tuple[int, float]:
+        raw = ch.get("text") or ""
+        overlap = 1 if _chunk_has_query_overlap(raw, q_tokens) else 0
+        return (overlap, _chunk_readability(raw))
+
+    return sorted(chunks, key=key, reverse=True)
+
+
+def _trim_chunks_for_public(chunks: list[dict[str, Any]], *, max_text: int = 240) -> list[dict[str, Any]]:
+    """În mod fără LLM, răspunsul JSON nu trebuie să repete tot OCR-ul; metadata rămâne intactă."""
+    out: list[dict[str, Any]] = []
+    for c in chunks:
+        d = dict(c)
+        t = d.get("text") or ""
+        if len(t) > max_text:
+            d["text"] = _truncate_words(t, max_text)
+        out.append(d)
+    return out
+
+
+def _fallback_answer(
+    query: str,
+    chunks: list[dict[str, Any]],
+    *,
+    source: str | None = None,
+    lex_tokens: list[str] | None = None,
+) -> str:
+    """Răspuns fără apel OpenAI: propoziții simple, fără markdown, potrivit citirii vocale."""
     if not chunks:
         src = (source or "").strip()
         if src:
             return (
-                f"Nu am găsit fragmente în index pentru sursa «{src}» și întrebarea ta. "
-                "Verifică că ai selectat exact sursa din listă sau re-indexează cartea din tab-ul «Cărți & voce». "
-                f"Întrebare: {query[:200]}"
+                "Nu am găsit în index text despre această întrebare pentru cartea aleasă. "
+                "Verifică numele cărții în listă sau indexează din nou cartea. "
+                f"Întrebarea ta sună așa: {_squish_ws(query)[:220]}"
             )
         return (
-            "Nu am găsit fragmente în index (rulează `python scripts/ingest_library.py` după ce pui PDF/MD în "
-            f"{LIBRARY_DIR}). Întrebarea ta: {query[:200]}"
+            "Nu am găsit nimic în index. Pune cartea în bibliotecă și rulează scriptul de indexare din documentația proiectului. "
+            f"Întrebarea ta: {_squish_ws(query)[:220]}"
         )
-    parts = [
-        "Iată ce am găsit în bibliotecă (fragmente; verifică sursa în metadata):\n",
-    ]
-    for i, ch in enumerate(chunks, start=1):
-        md = ch.get("metadata") or {}
-        src = md.get("source", "?")
-        page = md.get("page")
-        head = f"[{i}] {src}" + (f" p.{page}" if page is not None else "")
-        parts.append(f"\n### {head}\n{ch.get('text', '')[:1200]}")
-    parts.append(
-        "\n\n_(Mod LLM dezactivat: răspunsul e doar citate/scurte extrase. "
-        "Pune `LLM_MODE=openai` pentru sinteză liberă.)_"
-    )
-    return "\n".join(parts)
+    q_tokens = lex_tokens if lex_tokens is not None else _query_tokens_for_fallback(query)
+    excerpt_max = 160
+    readability_min = 0.36
+    max_take = 6
+    parts: list[str] = []
+    for ch in chunks[:max_take]:
+        raw = ch.get("text") or ""
+        if _chunk_readability(raw) < readability_min:
+            continue
+        if q_tokens and not _chunk_has_query_overlap(raw, q_tokens):
+            continue
+        ex = _pick_excerpt(raw, q_tokens, max_chars=excerpt_max)
+        clean = _squish_ws(ex)
+        if len(clean) < 36:
+            continue
+        parts.append(clean)
+    if not parts:
+        return (
+            "Din scanarea acestei cărți nu am putut extrage propoziții clare legate de întrebare. "
+            "Încearcă altfel întrebarea sau deschide cartea la citire directă."
+        )
+    body = ". ".join(parts)
+    if body and body[-1] not in ".!?":
+        body += "."
+    return body
 
 
 @app.post("/chat", response_model=ChatResponse, tags=["chat"])
@@ -235,9 +419,11 @@ def chat(req: ChatRequest) -> ChatResponse:
     where = _metadata_source_filter(req.source)
     chunks = rag.query(query, k=req.k, where=where)
     if LLM_MODE != "openai" or client is None:
+        qt = _query_tokens_for_fallback(query)
+        ranked = _sort_chunks_for_fallback(chunks, qt)
         return ChatResponse(
-            answer=_fallback_answer(query, chunks, source=req.source),
-            used_chunks=chunks,
+            answer=_fallback_answer(query, ranked, source=req.source, lex_tokens=qt),
+            used_chunks=_trim_chunks_for_public(ranked),
         )
 
     rendered = []
@@ -261,16 +447,20 @@ def chat(req: ChatRequest) -> ChatResponse:
                 {
                     "role": "system",
                     "content": (
-                        "Ești arhivistul unei biblioteci personale. Răspunde concis în limba utilizatorului; "
-                        "citează sursa (fișier / pagină) când te bazezi pe un fragment. "
-                        "Nu inventa citate care nu apar în fragmente."
+                        "Ești arhivistul unei biblioteci personale. Răspunde în limba utilizatorului. "
+                        "Bazează-te doar pe fragmentele primite; nu inventa citate. "
+                        "Scrie strict în propoziții uzuale, fără markdown, fără liste cu liniuță sau stea, "
+                        "fără JSON, fără antete gen «Rezumat», fără numere de pagină în text — potrivit pentru citire vocală."
                     ),
                 },
                 {"role": "user", "content": user_block},
             ],
         )
+    except (AuthenticationError, RateLimitError, BadRequestError, APIStatusError, APITimeoutError, APIError) as e:
+        raise openai_chat_error_to_http(e) from e
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"LLM error: {e}") from e
+        log.warning("chat LLM unexpected error: %s", e, exc_info=True)
+        raise HTTPException(status_code=502, detail=f"Eroare LLM neașteptată: {e}") from e
 
     answer = (r.choices[0].message.content or "").strip()
     if not answer:
@@ -278,78 +468,61 @@ def chat(req: ChatRequest) -> ChatResponse:
     return ChatResponse(answer=answer, used_chunks=chunks)
 
 @app.post("/ingest/files", response_model=IngestResponse, tags=["library"])
-async def ingest_files(files: list[UploadFile] = File(...)) -> IngestResponse:
-    summaries: list[dict[str, Any]] = []
-    added = 0
+async def ingest_files(
+    dry_run: bool = Form(False),
+    files: list[UploadFile] = File(...),
+) -> IngestResponse:
+    items: list[tuple[str, bytes]] = []
     for f in files:
-        name = (f.filename or "upload").strip()
         raw = await f.read()
-        if not raw:
-            summaries.append({"filename": name, "status": "error", "detail": "empty"})
-            continue
+        name = (f.filename or "upload").strip() or "upload"
+        items.append((name, raw))
+    out = ingest_main_files(rag, UPLOADS_DIR, items, dry_run=dry_run, progress=None)
+    return IngestResponse(**out)
 
-        saved = save_upload(uploads_dir=UPLOADS_DIR, filename=name, content=raw)
-        ext = saved.suffix.lower()
-        try:
-            if ext == ".pdf":
-                doc = extract_pdf(filename=name, content=raw)
-            elif ext in (".md", ".txt"):
-                doc = extract_text_like(filename=name, content=raw, source_type=ext.lstrip("."))
-            elif ext == ".docx":
-                doc = extract_docx(filename=name, content=raw)
-            elif ext == ".epub":
-                doc = extract_epub(filename=name, content=raw)
-            elif ext == ".doc":
-                summaries.append(
-                    {
-                        "filename": name,
-                        "status": "error",
-                        "detail": "format .doc (legacy) nu e suportat încă; convertește la .docx sau PDF.",
-                    }
-                )
-                continue
-            else:
-                summaries.append(
-                    {
-                        "filename": name,
-                        "status": "error",
-                        "detail": f"unsupported file type: {ext or '(no ext)'}",
-                    }
-                )
-                continue
 
-            texts, metas, ids = docs_to_chunks(doc=doc)
-            if not texts:
-                summaries.append(
-                    {
-                        "filename": name,
-                        "status": "error",
-                        "detail": "nu s-a extras text util. Pentru scanări folosește tab-ul «Cărți & voce» (OCR) sau `POST /voice-library/ingest`.",
-                        "saved_path": str(saved),
-                    }
-                )
-                continue
+@app.post("/ingest/jobs", tags=["library"], summary="Indexare asincronă cu progres SSE")
+async def ingest_jobs_create(
+    background_tasks: BackgroundTasks,
+    files: list[UploadFile] = File(...),
+) -> dict[str, Any]:
+    """Încarcă fișierele; procesarea RAG rulează în fundal. Urmărește `GET /ingest/jobs/{id}/events` (SSE)."""
+    items: list[tuple[str, bytes]] = []
+    for f in files:
+        raw = await f.read()
+        name = (f.filename or "upload").strip() or "upload"
+        items.append((name, raw))
+    job_id = ingest_jobs.create_job(kind="main")
+    background_tasks.add_task(
+        ingest_jobs.run_main_ingest_job,
+        job_id,
+        items,
+        uploads_dir=UPLOADS_DIR,
+        rag=rag,
+    )
+    return {
+        "job_id": job_id,
+        "status_url": f"/ingest/jobs/{job_id}",
+        "events_url": f"/ingest/jobs/{job_id}/events",
+    }
 
-            rag.add_texts(ids=ids, texts=texts, metadatas=metas)
-            added += len(ids)
-            summaries.append(
-                {
-                    "filename": name,
-                    "status": "ok",
-                    "saved_path": str(saved),
-                    "chunks_added": len(ids),
-                    "source_type": doc.source_type,
-                    "meta": doc.meta,
-                }
-            )
-        except Exception as e:
-            summaries.append({"filename": name, "status": "error", "detail": str(e), "saved_path": str(saved)})
 
-    return IngestResponse(
-        status="ok",
-        files=summaries,
-        added_chunks=added,
-        rag_chunks=rag.count(),
+@app.get("/ingest/jobs/{job_id}", tags=["library"])
+def ingest_job_status(job_id: str) -> dict[str, Any]:
+    st = ingest_jobs.job_snapshot(job_id)
+    if st is None:
+        raise HTTPException(status_code=404, detail="Job inexistent.")
+    return st
+
+
+@app.get("/ingest/jobs/{job_id}/events", tags=["library"])
+async def ingest_job_events(job_id: str) -> StreamingResponse:
+    if ingest_jobs.job_snapshot(job_id) is None:
+        raise HTTPException(status_code=404, detail="Job inexistent.")
+    return StreamingResponse(
+        ingest_jobs.sse_iter_job(job_id),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
     )
 
 
@@ -373,6 +546,30 @@ def voice_library_sources() -> dict[str, Any]:
     return {"ok": True, "sources": rag.list_sources(), "rag_chunks": rag.count()}
 
 
+@app.delete(
+    "/voice-library/index",
+    tags=["voice_library"],
+    summary="Șterge din RAG toate fragmentele unei surse",
+    description=(
+        "Query: `source` — exact aceeași valoare ca în metadata (numele fișierului din listă, ex. «carte.pdf»). "
+        "După ștergere, re-indexează cartea dacă vrei din nou în RAG."
+    ),
+)
+def voice_library_delete_index(source: str) -> dict[str, Any]:
+    s = (source or "").strip()
+    if not s:
+        raise HTTPException(status_code=422, detail="Parametrul «source» e obligatoriu.")
+    if len(s) > 512:
+        raise HTTPException(status_code=422, detail="Parametrul «source» e prea lung (max 512).")
+    deleted = rag.delete_by_source(source=s)
+    return {
+        "ok": True,
+        "source": s,
+        "deleted_chunks": deleted,
+        "rag_chunks": rag.count(),
+    }
+
+
 @app.post(
     "/voice-library/ingest",
     response_model=IngestResponse,
@@ -387,65 +584,70 @@ async def voice_library_ingest(
     files: list[UploadFile] = File(...),
     book_label: str = Form(""),
     force_ocr: str = Form("auto"),
+    dry_run: bool = Form(False),
 ) -> IngestResponse:
-    summaries: list[dict[str, Any]] = []
-    added = 0
-    bl = (book_label or "").strip() or None
+    items: list[tuple[str, bytes]] = []
     for f in files:
-        name = (f.filename or "upload").strip() or "upload"
         raw = await f.read()
-        if not raw:
-            summaries.append({"filename": name, "status": "error", "detail": "empty"})
-            continue
-        if not name.lower().endswith(".pdf"):
-            summaries.append(
-                {
-                    "filename": name,
-                    "status": "error",
-                    "detail": "În «Cărți & voce» acceptăm doar .pdf (scanat sau text).",
-                }
-            )
-            continue
+        name = (f.filename or "upload").strip() or "upload"
+        items.append((name, raw))
+    out = ingest_voice_pdf_batch(
+        rag,
+        UPLOADS_DIR,
+        items,
+        book_label=(book_label or "").strip() or None,
+        force_ocr=force_ocr,
+        dry_run=dry_run,
+        progress=None,
+    )
+    return IngestResponse(**out)
 
-        saved = save_upload(uploads_dir=UPLOADS_DIR, filename=name, content=raw)
-        try:
-            doc = extract_pdf_for_voice_shelf(
-                filename=name,
-                content=raw,
-                book_label=bl,
-                force_ocr=(force_ocr or "auto").strip(),
-            )
-            texts, metas, ids = docs_to_chunks(doc=doc)
-            if not texts:
-                summaries.append(
-                    {
-                        "filename": name,
-                        "status": "error",
-                        "detail": "nu s-au putut genera fragmente după OCR/extragere.",
-                        "saved_path": str(saved),
-                    }
-                )
-                continue
-            rag.add_texts(ids=ids, texts=texts, metadatas=metas)
-            added += len(ids)
-            summaries.append(
-                {
-                    "filename": name,
-                    "status": "ok",
-                    "saved_path": str(saved),
-                    "chunks_added": len(ids),
-                    "source_type": doc.source_type,
-                    "meta": doc.meta,
-                }
-            )
-        except Exception as e:  # noqa: BLE001
-            summaries.append({"filename": name, "status": "error", "detail": str(e), "saved_path": str(saved)})
 
-    return IngestResponse(
-        status="ok",
-        files=summaries,
-        added_chunks=added,
-        rag_chunks=rag.count(),
+@app.post("/voice-library/jobs", tags=["voice_library"], summary="Încărcare PDF + OCR/index asincron cu SSE")
+async def voice_library_jobs_create(
+    background_tasks: BackgroundTasks,
+    files: list[UploadFile] = File(...),
+    book_label: str = Form(""),
+    force_ocr: str = Form("auto"),
+) -> dict[str, Any]:
+    items: list[tuple[str, bytes]] = []
+    for f in files:
+        raw = await f.read()
+        name = (f.filename or "upload").strip() or "upload"
+        items.append((name, raw))
+    job_id = ingest_jobs.create_job(kind="voice")
+    background_tasks.add_task(
+        ingest_jobs.run_voice_ingest_job,
+        job_id,
+        items,
+        uploads_dir=UPLOADS_DIR,
+        rag=rag,
+        book_label=(book_label or "").strip() or None,
+        force_ocr=(force_ocr or "auto").strip(),
+    )
+    return {
+        "job_id": job_id,
+        "status_url": f"/voice-library/jobs/{job_id}",
+        "events_url": f"/voice-library/jobs/{job_id}/events",
+    }
+
+
+@app.get("/voice-library/jobs/{job_id}", tags=["voice_library"])
+def voice_library_job_status(job_id: str) -> dict[str, Any]:
+    st = ingest_jobs.job_snapshot(job_id)
+    if st is None:
+        raise HTTPException(status_code=404, detail="Job inexistent.")
+    return st
+
+
+@app.get("/voice-library/jobs/{job_id}/events", tags=["voice_library"])
+async def voice_library_job_events(job_id: str) -> StreamingResponse:
+    if ingest_jobs.job_snapshot(job_id) is None:
+        raise HTTPException(status_code=404, detail="Job inexistent.")
+    return StreamingResponse(
+        ingest_jobs.sse_iter_job(job_id),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
     )
 
 
@@ -744,12 +946,16 @@ def drive_folder_id(url: str) -> dict[str, str]:
     return {"folder_id": fid}
 
 
-@app.get("/", tags=["meta"])
-def root() -> dict[str, str]:
-    # JSON root rămâne util pentru API users, dar UI se servește la /static/.
+@app.get("/meta", tags=["meta"], summary="Rezumat serviciu (JSON)")
+def service_meta() -> dict[str, str]:
     return {
         "service": "second-brain-archivist",
         "docs": "/docs",
         "ui": "/static/index.html",
         "hint": "POST /ingest/files, POST /chat, GET /search, POST /archive/page, GET /drive/status, POST /drive/wizard/auto-place, POST /drive/batch/auto-organize — vezi README.",
     }
+
+
+@app.get("/", tags=["meta"], summary="Deschide UI-ul")
+def root() -> RedirectResponse:
+    return RedirectResponse(url="/static/index.html", status_code=302)

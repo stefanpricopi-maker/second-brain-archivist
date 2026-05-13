@@ -10,6 +10,7 @@ pypdf
 Pillow
 pdf2image
 pytesseract
+ocrmypdf>=16.0.0
 mcp
 python-docx
 ebooklib

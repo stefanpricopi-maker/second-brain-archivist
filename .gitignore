@@ -17,4 +17,5 @@ data/.ingest-cache/
 data/exports/
 data/uploads/
 data/drive/
+data/tls/
 **/client_secret*.json

@@ -95,6 +95,214 @@
       .replace(/"/g, "&quot;");
   }
 
+  /** Din corpul răspunsului API la /chat (JSON cu «answer» sau text simplu). */
+  function extractChatAnswerText(raw) {
+    const s = String(raw || "").trim();
+    if (!s) return "";
+    try {
+      const j = JSON.parse(s);
+      if (j && typeof j.answer === "string") return String(j.answer).trim();
+    } catch (_) {
+      /* nu e JSON */
+    }
+    return s;
+  }
+
+  /** Curăță markdown ușor pentru citire vocală. */
+  function textForSpeech(s) {
+    let t = String(s || "");
+    t = t.replace(/\*\*([^*]+)\*\*/g, "$1");
+    t = t.replace(/`([^`]+)`/g, "$1");
+    t = t.replace(/_{1,2}([^_\n]+)_{1,2}/g, "$1");
+    t = t.replace(/^#+\s*/gm, "");
+    t = t.replace(/^\s*[-*•]\s+/gm, "");
+    return t.replace(/\s+/g, " ").trim();
+  }
+
+  const MAIN_INGEST_PROGRESS = {
+    wrap: "mainIngestProgressWrap",
+    track: "mainIngestProgressTrack",
+    bar: "mainIngestProgressBar",
+    lab: "mainIngestProgressLabel",
+    phase: "mainIngestProgressPhase",
+    cancel: "btnMainIngestCancel",
+  };
+  const VOICE_INGEST_PROGRESS = {
+    wrap: "voiceIngestProgressWrap",
+    track: "voiceIngestProgressTrack",
+    bar: "voiceIngestProgressBar",
+    lab: "voiceIngestProgressLabel",
+    phase: "voiceIngestProgressPhase",
+    cancel: "btnVoiceIngestCancel",
+  };
+
+  const ingestSession = { main: { abort: null, es: null }, voice: { abort: null, es: null } };
+
+  function setIngestIndeterminate(cfg, on) {
+    const track = el(cfg.track);
+    if (track) track.classList.toggle("ingest-progress-indeterminate", !!on);
+  }
+
+  function setIngestPhase(cfg, text) {
+    const box = cfg.phase ? el(cfg.phase) : null;
+    if (!box) return;
+    const s = text == null ? "" : String(text);
+    box.textContent = s;
+    box.hidden = !s;
+  }
+
+  function setIngestProgressUi(cfg, visible, pct, opts) {
+    opts = opts || {};
+    const wrap = el(cfg.wrap);
+    const bar = el(cfg.bar);
+    const lab = el(cfg.lab);
+    const track = el(cfg.track);
+    const indet = !!opts.indeterminate;
+    if (!indet) setIngestIndeterminate(cfg, false);
+    else setIngestIndeterminate(cfg, true);
+    const p = Math.max(0, Math.min(100, Math.round(Number(pct) || 0)));
+    if (wrap) wrap.hidden = !visible;
+    if (bar && !indet) bar.style.width = p + "%";
+    if (lab) lab.textContent = indet ? "…" : p + "%";
+    if (track) {
+      if (indet) {
+        track.setAttribute("aria-busy", "true");
+        track.removeAttribute("aria-valuenow");
+      } else {
+        track.removeAttribute("aria-busy");
+        track.setAttribute("aria-valuenow", String(p));
+      }
+    }
+  }
+
+  function showIngestCancel(cfg, which, on) {
+    const b = cfg.cancel ? el(cfg.cancel) : null;
+    if (!b) return;
+    const sess = ingestSession[which];
+    b.hidden = !on;
+    if (on) {
+      b.onclick = () => {
+        try {
+          if (sess.abort) sess.abort();
+        } catch (_) {}
+        try {
+          if (sess.es) sess.es.close();
+        } catch (_) {}
+        sess.abort = null;
+        sess.es = null;
+        b.hidden = true;
+      };
+    } else {
+      b.onclick = null;
+    }
+  }
+
+  /** POST multipart: progres încărcare; returnează { promise, abort }. */
+  function postFormDataWithUploadProgress(url, formData, onUploadProgress) {
+    let xhr;
+    let sawComputable = false;
+    const promise = new Promise((resolve, reject) => {
+      xhr = new XMLHttpRequest();
+      xhr.open("POST", url);
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          sawComputable = true;
+          if (typeof onUploadProgress === "function") {
+            onUploadProgress((e.loaded / Math.max(e.total, 1)) * 100, { lengthComputable: true });
+          }
+        } else if (typeof onUploadProgress === "function") {
+          onUploadProgress(0, { lengthComputable: false });
+        }
+      };
+      xhr.upload.onloadend = () => {
+        if (typeof onUploadProgress === "function" && !sawComputable) {
+          onUploadProgress(100, { lengthComputable: false, uploadComplete: true });
+        }
+      };
+      xhr.onload = () => {
+        resolve({
+          ok: xhr.status >= 200 && xhr.status < 300,
+          status: xhr.status,
+          text: xhr.responseText || "",
+        });
+      };
+      xhr.onerror = () => reject(new Error("Rețea la încărcare"));
+      xhr.onabort = () => {
+        const err = new Error("Anulat.");
+        err.name = "AbortError";
+        reject(err);
+      };
+      xhr.send(formData);
+    });
+    return {
+      promise,
+      abort: () => {
+        if (xhr) xhr.abort();
+      },
+    };
+  }
+
+  function summarizeIngestFiles(files) {
+    if (!Array.isArray(files)) return "";
+    const bad = files.filter((f) => f && f.status === "error");
+    if (!bad.length) return "";
+    return bad.map((f) => String(f.filename || "?") + ": " + String(f.detail || "")).join(" | ");
+  }
+
+  function finishIngestStatus(statusId, data) {
+    const files = (data && data.files) || [];
+    const errs = files.filter((x) => x && x.status === "error");
+    const skipped = files.filter((x) => x && x.status === "skipped_unchanged");
+    const dry = !!(data && data.dry_run);
+    let line = dry ? "Simulare finalizată" : errs.length ? "Cu erori" : data && data.status === "ok" ? "OK" : "Finalizat";
+    const bits = [];
+    if (errs.length) bits.push("Eșuat: " + errs.map((e) => e.filename).join(", "));
+    if (skipped.length) bits.push("Neschimbat (conținut identic): " + skipped.map((s) => s.filename).join(", "));
+    if (bits.length) line += " — " + bits.join(" · ");
+    const summ = summarizeIngestFiles(files);
+    if (summ && errs.length) line += ". " + summ;
+    setStatus(statusId, line, errs.length ? "bad" : "ok");
+  }
+
+  function listenIngestJobSse(jobId, basePath, onData, sess) {
+    return new Promise((resolve, reject) => {
+      const url = apiUrl(basePath + "/" + jobId + "/events");
+      let es;
+      try {
+        es = new EventSource(url);
+      } catch (e) {
+        reject(e);
+        return;
+      }
+      if (sess) sess.es = es;
+      es.onmessage = (ev) => {
+        let d = null;
+        try {
+          d = JSON.parse(ev.data);
+        } catch {
+          return;
+        }
+        if (typeof onData === "function") onData(d);
+        if (d && d.status === "done") {
+          es.close();
+          if (sess) sess.es = null;
+          resolve(d);
+        } else if (d && d.status === "error") {
+          es.close();
+          if (sess) sess.es = null;
+          reject(new Error(d.error || "Eroare job indexare"));
+        }
+      };
+      es.onerror = () => {
+        try {
+          es.close();
+        } catch (_) {}
+        if (sess) sess.es = null;
+        reject(new Error("Flux progres întrerupt (SSE)."));
+      };
+    });
+  }
+
   async function loadServicePanel() {
     setStatus("statusService", "Încarc…");
     el("serviceChips").textContent = "";
@@ -114,6 +322,7 @@
         const parts = [
           ["RAG (fragmente)", String(d.rag_chunks ?? "?")],
           ["LLM", String(d.llm_mode || "?")],
+          ["Cheie OpenAI", d.openai_key_configured ? "setată" : "lipsește"],
           ["Arhivă", String(a.mode || "?")],
           ["Notion configurat", a.notion_configured ? "da" : "nu"],
           ["Drive activ", dr.enabled ? "da" : "nu"],
@@ -878,17 +1087,109 @@
       setStatus("statusIngest", "Alege fișiere.", "bad");
       return;
     }
-    setStatus("statusIngest", "Indexare…");
-    el("outIngest").textContent = "";
+    const dryRun = el("chkMainDryRun") && el("chkMainDryRun").checked;
+    const list = Array.from(files);
     const fd = new FormData();
-    for (const f of files) fd.append("files", f);
+    list.forEach((f) => fd.append("files", f, f.name));
+    fd.append("dry_run", dryRun ? "true" : "false");
+
+    setStatus("statusIngest", "", "");
+    setIngestPhase(MAIN_INGEST_PROGRESS, dryRun ? "Simulare…" : "");
+    setIngestProgressUi(MAIN_INGEST_PROGRESS, true, 0, {});
+    el("outIngest").textContent = "";
+    const btn = el("btnIngest");
+    if (btn) btn.disabled = true;
+    const sess = ingestSession.main;
+    sess.abort = null;
+    sess.es = null;
+
+    const cleanup = () => {
+      showIngestCancel(MAIN_INGEST_PROGRESS, "main", false);
+      sess.abort = null;
+      sess.es = null;
+      window.setTimeout(() => {
+        setIngestProgressUi(MAIN_INGEST_PROGRESS, false, 0, {});
+        setIngestPhase(MAIN_INGEST_PROGRESS, "");
+      }, 650);
+      if (btn) btn.disabled = false;
+    };
+
     try {
-      const r = await fetch(apiUrl("/ingest/files"), { method: "POST", body: fd });
-      const t = await r.text();
-      el("outIngest").textContent = t;
-      setStatus("statusIngest", r.ok ? "OK" : "HTTP " + r.status, r.ok ? "ok" : "bad");
+      if (dryRun) {
+        showIngestCancel(MAIN_INGEST_PROGRESS, "main", true);
+        const up = postFormDataWithUploadProgress(apiUrl("/ingest/files"), fd, (pct, meta) => {
+          const indet = meta && meta.lengthComputable === false && !meta.uploadComplete;
+          setIngestPhase(MAIN_INGEST_PROGRESS, indet ? "Încărcare (fără procent)…" : "Încărcare…");
+          setIngestProgressUi(MAIN_INGEST_PROGRESS, true, pct, { indeterminate: !!indet });
+        });
+        sess.abort = up.abort;
+        const res = await up.promise;
+        sess.abort = null;
+        showIngestCancel(MAIN_INGEST_PROGRESS, "main", false);
+        let data = null;
+        try {
+          data = JSON.parse(res.text);
+        } catch {
+          data = null;
+        }
+        el("outIngest").textContent = res.text;
+        if (res.ok && data) finishIngestStatus("statusIngest", data);
+        else setStatus("statusIngest", "HTTP " + res.status, "bad");
+      } else {
+        showIngestCancel(MAIN_INGEST_PROGRESS, "main", true);
+        const up = postFormDataWithUploadProgress(apiUrl("/ingest/jobs"), fd, (pct, meta) => {
+          const indet = meta && meta.lengthComputable === false && !meta.uploadComplete;
+          setIngestPhase(MAIN_INGEST_PROGRESS, indet ? "Încărcare (fără procent)…" : "Încărcare către server…");
+          setIngestProgressUi(MAIN_INGEST_PROGRESS, true, Math.min(99, pct * 0.35), { indeterminate: !!indet });
+        });
+        sess.abort = up.abort;
+        const res = await up.promise;
+        sess.abort = null;
+        if (!res.ok) {
+          el("outIngest").textContent = res.text;
+          setStatus("statusIngest", "HTTP " + res.status + " la creare job", "bad");
+          return;
+        }
+        let job = null;
+        try {
+          job = JSON.parse(res.text);
+        } catch (_) {
+          job = null;
+        }
+        const jobId = job && job.job_id ? String(job.job_id) : "";
+        if (!jobId) {
+          setStatus("statusIngest", "Răspuns job invalid.", "bad");
+          return;
+        }
+        setIngestPhase(MAIN_INGEST_PROGRESS, "Indexare pe server (OCR/extragere)…");
+        setIngestProgressUi(MAIN_INGEST_PROGRESS, true, 35, {});
+        const finalSnap = await listenIngestJobSse(
+          jobId,
+          "/ingest/jobs",
+          (d) => {
+            const p = d.percent != null ? Number(d.percent) : 0;
+            const scaled = 35 + (Math.min(100, Math.max(0, p)) / 100) * 65;
+            setIngestProgressUi(MAIN_INGEST_PROGRESS, true, scaled, {});
+            if (d.current_file) setIngestPhase(MAIN_INGEST_PROGRESS, "Fișier: " + d.current_file);
+          },
+          sess
+        );
+        sess.es = null;
+        const result = finalSnap && finalSnap.result ? finalSnap.result : null;
+        if (result) {
+          el("outIngest").textContent = JSON.stringify(result, null, 2);
+          finishIngestStatus("statusIngest", result);
+        } else {
+          setStatus("statusIngest", "Job terminat fără rezultat.", "bad");
+        }
+      }
     } catch (e) {
-      setStatus("statusIngest", "Eroare: " + e, "bad");
+      const aborted = e && (e.name === "AbortError" || String(e.message || "").indexOf("Anulat") >= 0);
+      if (aborted) setStatus("statusIngest", "Anulat.", "");
+      else setStatus("statusIngest", "Eroare: " + e, "bad");
+    } finally {
+      setIngestProgressUi(MAIN_INGEST_PROGRESS, true, 100, {});
+      cleanup();
     }
   });
 
@@ -907,7 +1208,8 @@
         body: JSON.stringify({ message: msg, k: 8 }),
       });
       const t = await r.text();
-      el("outChat").textContent = t;
+      const display = extractChatAnswerText(t);
+      el("outChat").textContent = display;
       setStatus("statusChat", r.ok ? "OK" : "HTTP " + r.status, r.ok ? "ok" : "bad");
     } catch (e) {
       setStatus("statusChat", "Eroare: " + e, "bad");
@@ -951,7 +1253,7 @@
       return;
     }
     window.speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(text);
+    const u = new SpeechSynthesisUtterance(textForSpeech(text));
     u.lang = "ro-RO";
     u.rate = 1.02;
     window.speechSynthesis.speak(u);
@@ -959,17 +1261,12 @@
 
   el("btnSpeak").addEventListener("click", () => {
     const raw = el("outChat").textContent || "";
-    try {
-      const j = JSON.parse(raw);
-      const ans = String(j.answer || "").trim();
-      if (!ans) {
-        setStatus("statusChat", "Nu am răspuns de citit.", "bad");
-        return;
-      }
-      speak(ans);
-    } catch {
-      setStatus("statusChat", "Răspunsul nu e JSON valid.", "bad");
+    const ans = extractChatAnswerText(raw);
+    if (!ans) {
+      setStatus("statusChat", "Nu am răspuns de citit.", "bad");
+      return;
     }
+    speak(ans);
   });
 
   async function loadVoiceOcrStatus() {
@@ -1070,7 +1367,8 @@
         body: JSON.stringify({ message: msg, k: 10, source: source }),
       });
       const t = await r.text();
-      if (out) out.textContent = t;
+      const display = extractChatAnswerText(t);
+      if (out) out.textContent = display;
       setStatus("statusVoiceChat", r.ok ? "OK" : "HTTP " + r.status, r.ok ? "ok" : "bad");
     } catch (e) {
       setStatus("statusVoiceChat", "Eroare: " + e, "bad");
@@ -1088,17 +1386,50 @@
     if (lab && label) lab.textContent = label;
   }
 
+  /** Browsere Chromium trimit audio la Google pentru transcriere; pe http://+IP din rețea e deseori blocată. */
+  function getVoiceSpeechOriginBlockMessage() {
+    if (typeof window === "undefined") return null;
+    if (typeof window.isSecureContext !== "boolean") return null;
+    if (window.isSecureContext) return null;
+    const h = String((window.location && window.location.hostname) || "").toLowerCase();
+    if (h === "localhost" || h === "127.0.0.1" || h === "::1") return null;
+    return (
+      "Pagina e pe HTTP într-un context nesigur (ex. http://192.168… sau alt IP). " +
+      "Dictarea în browser (Chromium) folosește un serviciu în cloud care de obicei nu merge așa. " +
+      "Deschide aplicația la http://127.0.0.1:PORT (același PC) sau pune în față HTTPS (reverse proxy / tunel)."
+    );
+  }
+
   function voiceMicErrorMessage(code) {
+    if (code === "network") {
+      const secure =
+        typeof window !== "undefined" &&
+        window.isSecureContext &&
+        String((window.location && window.location.protocol) || "").toLowerCase() === "https:";
+      const h = String((window.location && window.location.hostname) || "").toLowerCase();
+      const loopback = h === "localhost" || h === "127.0.0.1" || h === "::1";
+      const base =
+        "Transcrierea vocală (dictare) rulează în browser prin serviciul Google din cloud — nu depinde de serverul unde e găzduită aplicația. ";
+      if (!secure && !loopback) {
+        return (
+          base +
+          "Pagina nu e într-un context sigur (ex. http pe IP public). Folosește https:// cu certificat valid. Apoi verifică internet, VPN; în Brave: Shields down pentru acest site."
+        );
+      }
+      return (
+        base +
+        "Dacă tot vezi asta pe https, cauza e aproape mereu la client: rețea/VPN/firewall care blochează Google, sau Brave Shields (lion → Shields down). Încearcă din nou «Întreabă cu vocea»."
+      );
+    }
     const m = {
       "not-allowed":
-        "Microfon refuzat. În Chrome: iconița din stânga URL-ului → setări site → Microfon: Permite. Folosește https:// sau localhost.",
+        "Microfon refuzat. În bara de adresă: setări site → Microfon: Permite. Folosește https:// sau localhost. (Brave: verifică și Shields pentru acest site.)",
       "service-not-allowed":
-        "Microfon / serviciu vocal blocat. Folosește Chrome pe https:// sau localhost și verifică permisiunile site-ului.",
+        "Microfon / serviciu vocal blocat. Folosește https:// sau localhost și permisiunile site-ului. În Brave, Shields poate bloca serviciul de transcriere din cloud.",
       "no-speech":
-        "Nu s-a auzit voce suficient de clar. Vorbește mai tare, apoi apasă «Stop» când ai terminat fraza (ascultarea e continuă).",
+        "Browserul a semnalat «no-speech» (fără voce detectată spre serviciul de transcriere). Verifică microfonul implicit în OS, vorbește după «Canal audio pornit», sau apasă Stop dacă ai terminat.",
       "audio-capture": "Nu pot deschide microfonul (altă aplicație îl folosește sau lipsește dispozitivul).",
       aborted: "",
-      network: "Eroare de rețea la recunoașterea vocală — încearcă din nou.",
     };
     return Object.prototype.hasOwnProperty.call(m, code) ? m[code] : "Mic: " + code;
   }
@@ -1109,21 +1440,16 @@
       setStatus("statusVoiceChat", "Sinteză vocală indisponibilă în acest browser.", "bad");
       return;
     }
-    try {
-      const j = JSON.parse(raw);
-      const ans = String(j.answer || "").trim();
-      if (!ans) {
-        setStatus("statusVoiceChat", "Nu am răspuns de citit.", "bad");
-        return;
-      }
-      window.speechSynthesis.cancel();
-      const u = new SpeechSynthesisUtterance(ans);
-      u.lang = "ro-RO";
-      u.rate = 1.02;
-      window.speechSynthesis.speak(u);
-    } catch {
-      setStatus("statusVoiceChat", "Răspunsul nu e JSON valid.", "bad");
+    const ans = extractChatAnswerText(raw);
+    if (!ans) {
+      setStatus("statusVoiceChat", "Nu am răspuns de citit.", "bad");
+      return;
     }
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(textForSpeech(ans));
+    u.lang = "ro-RO";
+    u.rate = 1.02;
+    window.speechSynthesis.speak(u);
   }
 
   const btnVoiceIngest = el("btnVoiceIngest");
@@ -1135,23 +1461,116 @@
         setStatus("statusVoiceIngest", "Alege cel puțin un PDF.", "bad");
         return;
       }
-      setStatus("statusVoiceIngest", "Indexare…");
-      const out = el("outVoiceIngest");
-      if (out) out.textContent = "";
-      const fd = new FormData();
-      for (const f of files) fd.append("files", f);
+      const dryRun = el("chkVoiceDryRun") && el("chkVoiceDryRun").checked;
       const bl = el("voiceBookLabel");
       const fo = el("voiceForceOcr");
+      const list = Array.from(files);
+      const fd = new FormData();
+      list.forEach((f) => fd.append("files", f, f.name));
       fd.append("book_label", bl ? String(bl.value || "").trim() : "");
       fd.append("force_ocr", fo && fo.value ? String(fo.value) : "auto");
+      fd.append("dry_run", dryRun ? "true" : "false");
+
+      setStatus("statusVoiceIngest", "", "");
+      setIngestPhase(VOICE_INGEST_PROGRESS, dryRun ? "Simulare…" : "");
+      setIngestProgressUi(VOICE_INGEST_PROGRESS, true, 0, {});
+      const out = el("outVoiceIngest");
+      if (out) out.textContent = "";
+      const btn = btnVoiceIngest;
+      if (btn) btn.disabled = true;
+      const sess = ingestSession.voice;
+      sess.abort = null;
+      sess.es = null;
+
+      const cleanup = () => {
+        showIngestCancel(VOICE_INGEST_PROGRESS, "voice", false);
+        sess.abort = null;
+        sess.es = null;
+        window.setTimeout(() => {
+          setIngestProgressUi(VOICE_INGEST_PROGRESS, false, 0, {});
+          setIngestPhase(VOICE_INGEST_PROGRESS, "");
+        }, 650);
+        if (btn) btn.disabled = false;
+      };
+
       try {
-        const r = await fetch(apiUrl("/voice-library/ingest"), { method: "POST", body: fd });
-        const t = await r.text();
-        if (out) out.textContent = t;
-        setStatus("statusVoiceIngest", r.ok ? "OK" : "HTTP " + r.status, r.ok ? "ok" : "bad");
-        if (r.ok) await refreshVoiceSources();
+        if (dryRun) {
+          showIngestCancel(VOICE_INGEST_PROGRESS, "voice", true);
+          const up = postFormDataWithUploadProgress(apiUrl("/voice-library/ingest"), fd, (pct, meta) => {
+            const indet = meta && meta.lengthComputable === false && !meta.uploadComplete;
+            setIngestPhase(VOICE_INGEST_PROGRESS, indet ? "Încărcare (fără procent)…" : "Încărcare…");
+            setIngestProgressUi(VOICE_INGEST_PROGRESS, true, pct, { indeterminate: !!indet });
+          });
+          sess.abort = up.abort;
+          const res = await up.promise;
+          sess.abort = null;
+          showIngestCancel(VOICE_INGEST_PROGRESS, "voice", false);
+          let data = null;
+          try {
+            data = JSON.parse(res.text);
+          } catch {
+            data = null;
+          }
+          if (out) out.textContent = res.text;
+          if (res.ok && data) finishIngestStatus("statusVoiceIngest", data);
+          else setStatus("statusVoiceIngest", "HTTP " + res.status, "bad");
+        } else {
+          showIngestCancel(VOICE_INGEST_PROGRESS, "voice", true);
+          const up = postFormDataWithUploadProgress(apiUrl("/voice-library/jobs"), fd, (pct, meta) => {
+            const indet = meta && meta.lengthComputable === false && !meta.uploadComplete;
+            setIngestPhase(VOICE_INGEST_PROGRESS, indet ? "Încărcare (fără procent)…" : "Încărcare către server…");
+            setIngestProgressUi(VOICE_INGEST_PROGRESS, true, Math.min(99, pct * 0.35), { indeterminate: !!indet });
+          });
+          sess.abort = up.abort;
+          const res = await up.promise;
+          sess.abort = null;
+          if (!res.ok) {
+            if (out) out.textContent = res.text;
+            setStatus("statusVoiceIngest", "HTTP " + res.status + " la creare job", "bad");
+            return;
+          }
+          let job = null;
+          try {
+            job = JSON.parse(res.text);
+          } catch (_) {
+            job = null;
+          }
+          const jobId = job && job.job_id ? String(job.job_id) : "";
+          if (!jobId) {
+            setStatus("statusVoiceIngest", "Răspuns job invalid.", "bad");
+            return;
+          }
+          setIngestPhase(VOICE_INGEST_PROGRESS, "OCR și indexare pe server…");
+          setIngestProgressUi(VOICE_INGEST_PROGRESS, true, 35, {});
+          const finalSnap = await listenIngestJobSse(
+            jobId,
+            "/voice-library/jobs",
+            (d) => {
+              const p = d.percent != null ? Number(d.percent) : 0;
+              const scaled = 35 + (Math.min(100, Math.max(0, p)) / 100) * 65;
+              setIngestProgressUi(VOICE_INGEST_PROGRESS, true, scaled, {});
+              if (d.current_file) setIngestPhase(VOICE_INGEST_PROGRESS, "Fișier: " + d.current_file);
+            },
+            sess
+          );
+          sess.es = null;
+          const result = finalSnap && finalSnap.result ? finalSnap.result : null;
+          if (result) {
+            if (out) out.textContent = JSON.stringify(result, null, 2);
+            finishIngestStatus("statusVoiceIngest", result);
+            const ok = !(result.files || []).some((x) => x && x.status === "error");
+            if (ok) await refreshVoiceSources();
+          } else {
+            setStatus("statusVoiceIngest", "Job terminat fără rezultat.", "bad");
+          }
+        }
       } catch (e) {
-        setStatus("statusVoiceIngest", "Eroare: " + e, "bad");
+        const aborted = e && (e.name === "AbortError" || String(e.message || "").indexOf("Anulat") >= 0);
+        if (aborted) setStatus("statusVoiceIngest", "Anulat.", "");
+        else setStatus("statusVoiceIngest", "Eroare: " + e, "bad");
+      } finally {
+        setIngestProgressUi(VOICE_INGEST_PROGRESS, true, 100, {});
+        cleanup();
       }
     });
   }
@@ -1159,19 +1578,362 @@
   const btnVoiceRefresh = el("btnVoiceRefreshSources");
   if (btnVoiceRefresh) btnVoiceRefresh.addEventListener("click", () => refreshVoiceSources());
 
+  const btnVoiceDeleteFromRag = el("btnVoiceDeleteFromRag");
+  if (btnVoiceDeleteFromRag) {
+    btnVoiceDeleteFromRag.addEventListener("click", async () => {
+      const sel = el("voiceSourceSelect");
+      const source = sel && sel.value ? String(sel.value).trim() : "";
+      if (!source) {
+        setStatus("statusVoiceChat", "Alege cartea din listă înainte de ștergere din index.", "bad");
+        return;
+      }
+      const opt = sel && sel.selectedIndex >= 0 ? sel.options[sel.selectedIndex] : null;
+      const label = opt ? String(opt.textContent || source) : source;
+      const msg =
+        "Sigur vrei să ștergi din index (RAG) toate fragmentele pentru:\n\n" +
+        label +
+        "\n\nAcțiunea nu poate fi anulată. Fișierul PDF din folderul de upload nu se șterge — doar intrările din Chroma pentru această sursă.";
+      if (!window.confirm(msg)) return;
+      setStatus("statusVoiceChat", "Șterg din index…", "");
+      const outChat = el("outVoiceChat");
+      try {
+        const url = apiUrl("/voice-library/index") + "?source=" + encodeURIComponent(source);
+        const r = await fetch(url, { method: "DELETE" });
+        const t = await r.text();
+        let detail = t;
+        try {
+          const j = JSON.parse(t);
+          if (r.ok) {
+            detail =
+              "Șterse " +
+              String(j.deleted_chunks != null ? j.deleted_chunks : "?") +
+              " fragment(e). În tot indexul au rămas " +
+              String(j.rag_chunks != null ? j.rag_chunks : "?") +
+              " fragment(e).";
+          }
+        } catch (_) {
+          /* corp brut */
+        }
+        setStatus("statusVoiceChat", r.ok ? detail : "HTTP " + r.status + ": " + t, r.ok ? "ok" : "bad");
+        if (outChat) outChat.textContent = "";
+        if (r.ok) await refreshVoiceSources();
+        if (sel && r.ok) sel.value = "";
+      } catch (e) {
+        setStatus("statusVoiceChat", "Eroare: " + e, "bad");
+      }
+    });
+  }
+
   const btnVoiceAsk = el("btnVoiceAsk");
   if (btnVoiceAsk) btnVoiceAsk.addEventListener("click", () => voiceAskChat());
 
   const btnVoiceMic = el("btnVoiceMic");
+  /** Dictare: browserul poate închide singur după tăcere — legăm sesiuni până la Stop. */
+  const voiceDict = {
+    active: false,
+    userStop: false,
+    chain: 0,
+    buf: "",
+    /** Ultimul text afișat din onresult; la Stop uneori lipsește ultimul eveniment — folosim asta la trimitere. */
+    lastMerged: "",
+    maxChain: 120,
+    networkFail: 0,
+    maxNetworkRetries: 6,
+    noSpeechStreak: 0,
+    maxNoSpeechStreak: 40,
+  };
+
+  function getVoiceQuestionForSubmit() {
+    const box = el("voiceQuestionText");
+    const fromBox = box ? String(box.value || "").trim() : "";
+    const fallback = String(voiceDict.lastMerged || "").trim() || String(voiceDict.buf || "").trim();
+    const q = fromBox || fallback;
+    if (box && q && !fromBox) box.value = q;
+    return q;
+  }
+
+  /** Sfat scurt după Stop fără text (Brave include „Chrome” în UA — testăm Brave primul). */
+  function voiceStopEmptyHint() {
+    const ua = (typeof navigator !== "undefined" && navigator.userAgent) || "";
+    if (/Brave/i.test(ua)) {
+      return "Încearcă Shields relaxat pentru site, microfon permis, apoi o mică pauză după ultimul cuvânt înainte de Stop.";
+    }
+    if (/Edg/i.test(ua)) {
+      return "Verifică permisiunea pentru microfon; așteaptă puțin după ultimul cuvânt înainte de Stop.";
+    }
+    if (/Chrom/i.test(ua)) {
+      return "Chrome poate întârzia ultimul fragment — așteaptă ~1 s după ce vorbești; verifică intrarea de microfon în OS.";
+    }
+    return "Așteaptă puțin după ultimul cuvânt înainte de Stop; verifică microfonul în setările sistemului.";
+  }
+
+  function triggerVoiceStop(processingMsg) {
+    voiceDict.userStop = true;
+    if (voiceRec) {
+      try {
+        voiceRec.stop();
+      } catch (_) {
+        /* ignore */
+      }
+      if (processingMsg) setStatus("statusVoiceChat", processingMsg, "ok");
+      return;
+    }
+    if (!voiceDict.active) {
+      setVoiceListeningUi(false);
+      setStatus("statusVoiceChat", "Dictarea nu era activă (afișaj microfon resetat).", "");
+      voiceDict.userStop = false;
+      return;
+    }
+    /* voiceRec e deja null (pauză între segmente sau imediat după stop): lasă mai întâi onend să ruleze, apoi finalizează dacă tot e blocat. */
+    window.setTimeout(() => {
+      if (!voiceDict.userStop) return;
+      if (!voiceDict.active) {
+        voiceDict.userStop = false;
+        return;
+      }
+      voiceDict.active = false;
+      setVoiceListeningUi(false);
+      const finalize = () => {
+        const q = getVoiceQuestionForSubmit();
+        voiceDict.userStop = false;
+        voiceDict.buf = "";
+        voiceDict.lastMerged = "";
+        voiceDict.chain = 0;
+        voiceDict.networkFail = 0;
+        voiceDict.noSpeechStreak = 0;
+        if (q) {
+          setStatus("statusVoiceChat", "Trimit întrebarea…", "ok");
+          voiceAskChat();
+        } else {
+          setStatus(
+            "statusVoiceChat",
+            "N-am prins text din dictare. Verifică cartea din listă. " + voiceStopEmptyHint() + " Reporne «Întreabă cu vocea» sau scrie întrebarea.",
+            "bad"
+          );
+        }
+      };
+      let attempt2 = 0;
+      function scheduleFinalizeRetry() {
+        const delay = attempt2 === 0 ? 0 : attempt2 === 1 ? 300 : 350;
+        window.setTimeout(() => {
+          if (getVoiceQuestionForSubmit()) {
+            finalize();
+            return;
+          }
+          attempt2 += 1;
+          if (attempt2 < 3) scheduleFinalizeRetry();
+          else finalize();
+        }, delay);
+      }
+      scheduleFinalizeRetry();
+    }, 0);
+  }
+
+  /** @param {{ skipChainIncrement?: boolean }} [opts] */
+  function startVoiceListeningChain(opts) {
+    opts = opts || {};
+    if (!voiceDict.active || voiceDict.userStop) return;
+    if (voiceDict.chain >= voiceDict.maxChain) {
+      voiceDict.active = false;
+      setVoiceListeningUi(false);
+      voiceRec = null;
+      voiceDict.networkFail = 0;
+      voiceDict.noSpeechStreak = 0;
+      setStatus(
+        "statusVoiceChat",
+        "Ascultare oprită automat (prea multe reporniri fără text nou). Apasă din nou «Întreabă cu vocea» sau scrie întrebarea.",
+        "bad"
+      );
+      return;
+    }
+    if (!opts.skipChainIncrement) voiceDict.chain += 1;
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const rec = new SR();
+    voiceRec = rec;
+    rec.lang = "ro-RO";
+    rec.interimResults = true;
+    rec.continuous = false;
+    rec.maxAlternatives = 1;
+
+    rec.onresult = (ev) => {
+      voiceDict.networkFail = 0;
+      voiceDict.noSpeechStreak = 0;
+      let interim = "";
+      for (let i = ev.resultIndex; i < ev.results.length; i++) {
+        const txt = ev.results[i][0].transcript;
+        if (ev.results[i].isFinal) voiceDict.buf += txt;
+        else interim += txt;
+      }
+      const box = el("voiceQuestionText");
+      const merged = (voiceDict.buf + (interim ? (voiceDict.buf ? " " : "") + interim : "")).trim();
+      voiceDict.lastMerged = merged;
+      if (merged) voiceDict.chain = 0;
+      if (box) box.value = merged;
+      setVoiceListeningUi(
+        true,
+        interim
+          ? "Te aud — transcriu… (apasă Stop când ai terminat)"
+          : voiceDict.buf
+            ? "Fragment înregistrat — continuă sau Stop."
+            : "Aștept să vorbești…"
+      );
+    };
+
+    rec.onerror = (e) => {
+      if (e.error === "aborted") return;
+      /* no-speech după Stop: nu reseta sesiunea înainte de onend */
+      if (e.error === "no-speech" && voiceDict.userStop) {
+        voiceRec = null;
+        return;
+      }
+      if (e.error === "no-speech" && !voiceDict.active) {
+        voiceRec = null;
+        return;
+      }
+      if (e.error === "no-speech" && voiceDict.active && !voiceDict.userStop) {
+        voiceDict.noSpeechStreak += 1;
+        if (voiceDict.noSpeechStreak >= voiceDict.maxNoSpeechStreak) {
+          voiceRec = null;
+          voiceDict.active = false;
+          voiceDict.noSpeechStreak = 0;
+          setVoiceListeningUi(false);
+          setStatus(
+            "statusVoiceChat",
+            "Nu detectez voce transcrisă după multe încercări. Verifică: microfonul implicit în OS (Chrome folosește intrarea aleasă acolo), volumul, că nu vorbești în alt dispozitiv; vorbește după ce apare «Canal audio pornit». Sau scrie întrebarea.",
+            "bad"
+          );
+          return;
+        }
+        setVoiceListeningUi(true, "Nu s-a auzit voce — reîncerc automat… vorbește sau apasă Stop.");
+        if (voiceDict.noSpeechStreak === 1 || voiceDict.noSpeechStreak % 8 === 0) {
+          setStatus(
+            "statusVoiceChat",
+            "Încă ascult (tăcere / no-speech). Vorbește clar după ce vezi «Canal audio pornit»; verifică microfonul implicit în setările sistemului.",
+            "ok"
+          );
+        }
+        voiceRec = null;
+        window.setTimeout(() => {
+          if (voiceDict.active && !voiceDict.userStop) startVoiceListeningChain({ skipChainIncrement: true });
+        }, 480);
+        return;
+      }
+      if (
+        e.error === "network" &&
+        voiceDict.active &&
+        !voiceDict.userStop &&
+        voiceDict.networkFail < voiceDict.maxNetworkRetries
+      ) {
+        voiceDict.networkFail += 1;
+        voiceRec = null;
+        const delay = 450 + voiceDict.networkFail * 350;
+        setVoiceListeningUi(
+          true,
+          "Problemă de rețea la transcriere — reîncerc " + voiceDict.networkFail + "/" + voiceDict.maxNetworkRetries + "…"
+        );
+        setStatus(
+          "statusVoiceChat",
+          "Verifică internetul / VPN-ul; transcrierea din browser folosește un serviciu online (Google). În Brave încearcă Shields oprit pentru acest site. Reiau automat…",
+          "ok"
+        );
+        window.setTimeout(() => {
+          if (voiceDict.active && !voiceDict.userStop) startVoiceListeningChain({ skipChainIncrement: true });
+        }, delay);
+        return;
+      }
+      setVoiceListeningUi(false);
+      voiceDict.active = false;
+      voiceRec = null;
+      voiceDict.networkFail = 0;
+      voiceDict.noSpeechStreak = 0;
+      const originBlock = getVoiceSpeechOriginBlockMessage();
+      const msg = voiceMicErrorMessage(e.error);
+      if (msg) {
+        const out =
+          e.error === "network" && originBlock ? originBlock + " " + msg : msg;
+        setStatus("statusVoiceChat", out, "bad");
+      }
+    };
+
+    rec.onstart = () => {
+      setVoiceListeningUi(true, "Microfon activ — vorbește. Apasă «Stop» când ai terminat.");
+      if (voiceDict.chain <= 1) {
+        setStatus("statusVoiceChat", "Ascult… (dacă se închide singur după o tăcere, reiau automat până apeși Stop).", "ok");
+      }
+    };
+    rec.onaudiostart = () => setVoiceListeningUi(true, "Canal audio pornit — vorbește acum.");
+    rec.onsoundstart = () => setVoiceListeningUi(true, "Detectez sunet…");
+    rec.onspeechstart = () => setVoiceListeningUi(true, "Te aud…");
+
+    rec.onend = () => {
+      voiceRec = null;
+      if (!voiceDict.active) return;
+      if (voiceDict.userStop) {
+        voiceDict.active = false;
+        setVoiceListeningUi(false);
+        const flushStop = () => {
+          const q = getVoiceQuestionForSubmit();
+          voiceDict.userStop = false;
+          voiceDict.buf = "";
+          voiceDict.lastMerged = "";
+          voiceDict.chain = 0;
+          voiceDict.networkFail = 0;
+          voiceDict.noSpeechStreak = 0;
+          if (q) {
+            setStatus("statusVoiceChat", "Trimit întrebarea…", "ok");
+            voiceAskChat();
+          } else {
+            setStatus(
+              "statusVoiceChat",
+              "N-am prins text din dictare. Verifică cartea din listă. " + voiceStopEmptyHint() + " Reporne «Întreabă cu vocea» sau scrie întrebarea.",
+              "bad"
+            );
+          }
+        };
+        let attempt = 0;
+        function scheduleFlushRetry() {
+          const delay = attempt === 0 ? 0 : attempt === 1 ? 300 : 350;
+          window.setTimeout(() => {
+            if (getVoiceQuestionForSubmit()) {
+              flushStop();
+              return;
+            }
+            attempt += 1;
+            if (attempt < 3) scheduleFlushRetry();
+            else flushStop();
+          }, delay);
+        }
+        scheduleFlushRetry();
+        return;
+      }
+      /* Sesiune închisă de browser fără Stop — legăm următoarea bucată. */
+      setVoiceListeningUi(true, "Continui ascultarea…");
+      window.setTimeout(() => {
+        if (voiceDict.active && !voiceDict.userStop) startVoiceListeningChain({ skipChainIncrement: true });
+      }, 120);
+    };
+
+    try {
+      rec.start();
+    } catch (err) {
+      voiceRec = null;
+      if (voiceDict.active && !voiceDict.userStop && voiceDict.chain < voiceDict.maxChain) {
+        window.setTimeout(() => {
+          if (voiceDict.active && !voiceDict.userStop) startVoiceListeningChain({ skipChainIncrement: true });
+        }, 250);
+        return;
+      }
+      voiceDict.active = false;
+      setVoiceListeningUi(false);
+      const m = err && err.message ? err.message : String(err);
+      setStatus("statusVoiceChat", "Nu pot porni microfonul: " + m, "bad");
+    }
+  }
+
   if (btnVoiceMic) {
     btnVoiceMic.addEventListener("click", () => {
-      if (voiceRec) {
-        try {
-          voiceRec.stop();
-        } catch (_) {
-          /* ignore */
-        }
-        setStatus("statusVoiceChat", "Finalizez transcrierea…", "ok");
+      if (voiceRec || voiceDict.active) {
+        triggerVoiceStop("Finalizez transcrierea…");
         return;
       }
       const sel = el("voiceSourceSelect");
@@ -1184,78 +1946,28 @@
         return;
       }
       if (!supportsSpeechRecognition()) {
-        setStatus("statusVoiceChat", "Dictarea nu e disponibilă în acest browser (încearcă Chrome).", "bad");
+        setStatus("statusVoiceChat", "Dictarea nu e disponibilă în acest browser (încearcă Chrome, Brave sau Edge — Chromium).", "bad");
         return;
       }
-      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-      voiceRec = new SR();
-      voiceRec.lang = "ro-RO";
-      voiceRec.interimResults = true;
-      voiceRec.continuous = true;
-      voiceRec.maxAlternatives = 1;
-      let finalText = "";
-      voiceRec.onresult = (ev) => {
-        let interim = "";
-        for (let i = ev.resultIndex; i < ev.results.length; i++) {
-          const txt = ev.results[i][0].transcript;
-          if (ev.results[i].isFinal) finalText += txt;
-          else interim += txt;
-        }
-        const box = el("voiceQuestionText");
-        const merged = (finalText + (interim ? (finalText ? " " : "") + interim : "")).trim();
-        if (box) box.value = merged;
-        setVoiceListeningUi(
-          true,
-          interim
-            ? "Te aud — transcriu în timp real… (apasă Stop când ai terminat)"
-            : finalText
-              ? "Text înregistrat — poți continua sau apasă Stop."
-              : "Aștept să vorbești…"
-        );
-      };
-      voiceRec.onerror = (e) => {
-        setVoiceListeningUi(false);
-        voiceRec = null;
-        if (e.error === "aborted") return;
-        const msg = voiceMicErrorMessage(e.error);
-        if (msg) setStatus("statusVoiceChat", msg, "bad");
-      };
-      voiceRec.onstart = () => {
-        setVoiceListeningUi(true, "Microfon activ — vorbești; poți face pauze. Apasă «Stop» sau din nou microfonul când ai terminat.");
-        setStatus("statusVoiceChat", "Ascult continuu… Apasă «Stop» când ai terminat ca să trimit întrebarea.", "ok");
-      };
-      voiceRec.onaudiostart = () => {
-        setVoiceListeningUi(true, "Canal audio pornit — vorbește acum.");
-      };
-      voiceRec.onsoundstart = () => {
-        setVoiceListeningUi(true, "Detectez sunet…");
-      };
-      voiceRec.onspeechstart = () => {
-        setVoiceListeningUi(true, "Te aud — transcriu…");
-      };
-      voiceRec.onend = () => {
-        setVoiceListeningUi(false);
-        voiceRec = null;
-        const q = (el("voiceQuestionText") && el("voiceQuestionText").value || "").trim();
-        if (q) {
-          setStatus("statusVoiceChat", "Trimit întrebarea…", "ok");
-          voiceAskChat();
-        } else {
-          setStatus(
-            "statusVoiceChat",
-            "Nu am primit text din microfon. Pași: (1) alege cartea din listă; (2) «Întreabă cu vocea» → vorbește; (3) «Stop» când ai terminat (sau din nou microfonul); (4) permisiune microfon în Chrome pentru acest site.",
-            "bad"
-          );
-        }
-      };
-      try {
-        voiceRec.start();
-      } catch (err) {
-        setVoiceListeningUi(false);
-        voiceRec = null;
-        const m = err && err.message ? err.message : String(err);
-        setStatus("statusVoiceChat", "Nu pot porni microfonul: " + m, "bad");
+      if (!window.SpeechRecognition && !window.webkitSpeechRecognition) {
+        setStatus("statusVoiceChat", "SpeechRecognition indisponibil.", "bad");
+        return;
       }
+      const originBlock = getVoiceSpeechOriginBlockMessage();
+      if (originBlock) {
+        setStatus("statusVoiceChat", originBlock, "bad");
+        return;
+      }
+      voiceDict.active = true;
+      voiceDict.userStop = false;
+      voiceDict.chain = 0;
+      voiceDict.networkFail = 0;
+      voiceDict.noSpeechStreak = 0;
+      voiceDict.buf = "";
+      voiceDict.lastMerged = "";
+      const box = el("voiceQuestionText");
+      if (box) box.value = "";
+      startVoiceListeningChain();
     });
   }
 
@@ -1266,15 +1978,11 @@
   if (btnVoiceStopSpeak) {
     btnVoiceStopSpeak.addEventListener("click", () => {
       if ("speechSynthesis" in window) window.speechSynthesis.cancel();
-      if (voiceRec) {
-        try {
-          voiceRec.stop();
-        } catch (_) {
-          /* ignore */
-        }
-        setStatus("statusVoiceChat", "Finalizez dictarea…", "ok");
+      if (voiceRec || voiceDict.active) {
+        triggerVoiceStop("Finalizez dictarea…");
       } else {
-        setStatus("statusVoiceChat", "Citirea vocală a fost oprită.", "");
+        setVoiceListeningUi(false);
+        setStatus("statusVoiceChat", "Citirea răspunsului (voce) oprită. Dictarea era deja oprită.", "");
       }
     });
   }

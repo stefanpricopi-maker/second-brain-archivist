@@ -2,13 +2,37 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
+import re
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from pypdf import PdfReader
+
+
+def _dedupe_consecutive_lines(text: str) -> str:
+    """Elimină linii identice consecutive — frecvent la anteturi / artefacte OCR."""
+    lines = (text or "").splitlines()
+    out: list[str] = []
+    prev: str | None = None
+    for ln in lines:
+        s = ln.strip()
+        if not s:
+            continue
+        if prev is not None and s == prev:
+            continue
+        out.append(s)
+        prev = s
+    return "\n".join(out)
+
+
+def _normalize_scanned_page_text(text: str) -> str:
+    t = _dedupe_consecutive_lines(text)
+    return " ".join(t.split())
 
 
 def _chunk_text(text: str, *, chunk_size: int = 1400, overlap: int = 200) -> list[str]:
@@ -23,6 +47,62 @@ def _chunk_text(text: str, *, chunk_size: int = 1400, overlap: int = 200) -> lis
     return chunks
 
 
+# După punctuație de sfârșit de propoziție, urmată de spații și început plauzibil de frază (ro + cifre).
+_SPLIT_SENTENCES = re.compile(
+    r'(?<=[.!?…])(?:[\"\'»\)\]])*\s+(?=(?:[\"„"\'«(])*[A-ZĂÂÎȘȚa-zăâîșț0-9])'
+)
+
+
+def _split_sentences_ro(text: str) -> list[str]:
+    raw = " ".join((text or "").split())
+    if len(raw) < 2:
+        return []
+    parts = _SPLIT_SENTENCES.split(raw)
+    out = [p.strip() for p in parts if p.strip()]
+    return out if out else [raw]
+
+
+def _explode_oversized_sentences(sents: list[str], chunk_size: int) -> list[str]:
+    out: list[str] = []
+    for s in sents:
+        if len(s) <= chunk_size:
+            out.append(s)
+        else:
+            out.extend(_chunk_text(s, chunk_size=chunk_size, overlap=0))
+    return out
+
+
+def _chunk_text_by_sentences(text: str, *, chunk_size: int, overlap: int) -> list[str]:
+    """Grupare pe propoziții până la chunk_size; parametrul overlap e ignorat (rezervat)."""
+    del overlap
+    sents = _explode_oversized_sentences(_split_sentences_ro(text), chunk_size)
+    if not sents:
+        return []
+    if len(sents) == 1:
+        return _chunk_text(sents[0], chunk_size=chunk_size, overlap=0)
+    chunks: list[str] = []
+    start = 0
+    while start < len(sents):
+        parts: list[str] = []
+        total = 0
+        pos = start
+        while pos < len(sents):
+            s = sents[pos]
+            sep = 1 if parts else 0
+            if total + sep + len(s) > chunk_size and parts:
+                break
+            if total + sep + len(s) > chunk_size and not parts:
+                parts.append(s[:chunk_size])
+                pos += 1
+                break
+            parts.append(s)
+            total += sep + len(s)
+            pos += 1
+        chunks.append(" ".join(parts))
+        start = pos
+    return chunks if chunks else _chunk_text(text, chunk_size=chunk_size, overlap=0)
+
+
 def _stable_id(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()[:32]
 
@@ -33,6 +113,34 @@ class ExtractedDoc:
     source_type: str
     pages: list[str]
     meta: dict[str, Any]
+
+
+def _chunk_params_for_doc(doc: ExtractedDoc) -> tuple[int, int]:
+    """Dimensiuni fragment: PDF scanat/OCR mai scurt; EPUB ușor mai lung pentru flux narativ."""
+    base = int(os.getenv("RAG_CHUNK_CHARS") or "1400")
+    overlap = int(os.getenv("RAG_CHUNK_OVERLAP") or "200")
+    if doc.source_type == "epub":
+        base = min(2000, int(base * 1.12))
+        overlap = min(280, int(overlap * 1.15))
+    if doc.source_type == "scanned_pdf" or doc.meta.get("ocr"):
+        o_sz = int(os.getenv("RAG_CHUNK_CHARS_OCR") or "1100")
+        o_ov = int(os.getenv("RAG_CHUNK_OVERLAP_OCR") or "160")
+        base = min(base, max(500, o_sz))
+        overlap = min(overlap, max(80, o_ov))
+    base = max(400, min(4000, base))
+    overlap = max(0, min(base // 2, overlap))
+    return base, overlap
+
+
+def _sentence_chunking_enabled_for(doc: ExtractedDoc) -> bool:
+    if not (
+        doc.source_type == "scanned_pdf"
+        or doc.meta.get("ocr")
+        or doc.meta.get("scan_derived")
+    ):
+        return False
+    v = (os.getenv("RAG_CHUNK_BY_SENTENCES") or "1").strip().lower()
+    return v not in ("0", "false", "no", "off")
 
 
 PDF_MIN_TEXT_CHARS = 80
@@ -98,9 +206,27 @@ def extract_pdf_for_voice_shelf(
             meta=meta_base,
         )
 
-    from app.ocr_pdf import ocr_pdf_pages
+    from app.ocr_pdf import ocr_pdf_pages, try_run_ocrmypdf
 
-    ocr_pages = ocr_pdf_pages(content=content)
+    content_for_pipeline = content
+    refined_pdf = try_run_ocrmypdf(content=content, lang=os.getenv("OCR_LANG"))
+    if refined_pdf:
+        content_for_pipeline = refined_pdf
+    layered = extract_pdf(filename=filename, content=content_for_pipeline)
+    layered_n = _pdf_text_char_count(layered)
+    if layered_n >= PDF_MIN_TEXT_CHARS:
+        meta = dict(meta_base)
+        meta["ocr_engine"] = "ocrmypdf"
+        meta["scan_derived"] = True
+        meta["page_count"] = len(layered.pages)
+        return ExtractedDoc(
+            source=base.source,
+            source_type="pdf",
+            pages=layered.pages,
+            meta=meta,
+        )
+
+    ocr_pages = ocr_pdf_pages(content=content_for_pipeline)
     if not ocr_pages:
         raise ValueError("OCR: nu s-au putut citi paginile din PDF.")
     ocr_joined = sum(len(p or "") for p in ocr_pages)
@@ -261,6 +387,10 @@ def ingest_bytes_into_rag(
                 "chunks_added": 0,
             }
 
+        h = hashlib.sha256(content).hexdigest()
+        ts = datetime.now(timezone.utc).isoformat()
+        doc.meta.setdefault("bytes_sha256", h)
+        doc.meta["ingested_at"] = ts
         texts, metas, ids = docs_to_chunks(doc=doc)
         if not texts:
             return {
@@ -269,6 +399,8 @@ def ingest_bytes_into_rag(
                 "chunks_added": 0,
             }
         for m in metas:
+            m["bytes_sha256"] = h
+            m.setdefault("ingested_at", ts)
             m.update(extra)
         rag.add_texts(ids=ids, texts=texts, metadatas=metas)
         return {
@@ -281,12 +413,43 @@ def ingest_bytes_into_rag(
         return {"status": "error", "detail": str(e), "chunks_added": 0}
 
 
+def _dedupe_adjacent_identical_chunks(
+    texts: list[str], metas: list[dict[str, Any]], ids: list[str]
+) -> tuple[list[str], list[dict[str, Any]], list[str]]:
+    """Elimină fragmente consecutive cu text normalizat identic (artefacte OCR / antete repetate)."""
+    if not texts:
+        return texts, metas, ids
+    out_t: list[str] = []
+    out_m: list[dict[str, Any]] = []
+    out_i: list[str] = []
+    prev_norm: str | None = None
+    for t, m, i in zip(texts, metas, ids):
+        n = " ".join((t or "").split())
+        if n and prev_norm is not None and n == prev_norm:
+            continue
+        prev_norm = n if n else None
+        out_t.append(t)
+        out_m.append(m)
+        out_i.append(i)
+    return out_t, out_m, out_i
+
+
 def docs_to_chunks(*, doc: ExtractedDoc) -> tuple[list[str], list[dict[str, Any]], list[str]]:
     texts: list[str] = []
     metas: list[dict[str, Any]] = []
     ids: list[str] = []
+    cs, ov = _chunk_params_for_doc(doc)
+    scanned_noise = doc.source_type == "scanned_pdf" or bool(doc.meta.get("ocr"))
+    sentence_mode = _sentence_chunking_enabled_for(doc)
     for page_idx, page_text in enumerate(doc.pages, start=1):
-        for chunk_idx, chunk in enumerate(_chunk_text(page_text), start=1):
+        page_work = (
+            _normalize_scanned_page_text(page_text) if scanned_noise else " ".join((page_text or "").split())
+        )
+        if sentence_mode:
+            pieces = _chunk_text_by_sentences(page_work, chunk_size=cs, overlap=ov)
+        else:
+            pieces = _chunk_text(page_work, chunk_size=cs, overlap=ov)
+        for chunk_idx, chunk in enumerate(pieces, start=1):
             key = f"{doc.source}|p{page_idx}|c{chunk_idx}|{doc.source_type}"
             ids.append(_stable_id(key))
             texts.append(chunk)
@@ -301,5 +464,6 @@ def docs_to_chunks(*, doc: ExtractedDoc) -> tuple[list[str], list[dict[str, Any]
             elif doc.source_type == "epub":
                 md["chapter"] = page_idx
             metas.append({k: v for k, v in md.items() if v is not None})
+    texts, metas, ids = _dedupe_adjacent_identical_chunks(texts, metas, ids)
     return texts, metas, ids
 

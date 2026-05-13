@@ -35,12 +35,23 @@
           <h2>Indexare documente</h2>
           <p class="lead">PDF, EPUB, TXT, MD, DOCX — stocate local, fragmente în Chroma.</p>
           <input id="fileInput" type="file" multiple />
+          <label class="ingest-dry-run"
+            ><input type="checkbox" id="chkMainDryRun" /> Simulare (verifică tip/mărime, fără scriere în index)</label
+          >
           <div style="height: 12px"></div>
-          <div class="row">
+          <div class="row ingest-actions-row">
             <button class="primary" id="btnIngest">Indexează fișierele</button>
+            <button type="button" id="btnMainIngestCancel" class="ghost" hidden>Anulează</button>
             <button type="button" id="btnStatus">Stare index</button>
           </div>
           <div class="status" id="statusIngest"></div>
+          <div id="mainIngestProgressWrap" class="ingest-progress-wrap" hidden>
+            <div id="mainIngestProgressPhase" class="ingest-progress-phase" hidden></div>
+            <div id="mainIngestProgressTrack" class="ingest-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+              <div id="mainIngestProgressBar" class="ingest-progress-bar" style="width: 0%"></div>
+            </div>
+            <div id="mainIngestProgressLabel" class="ingest-progress-label">0%</div>
+          </div>
           <pre class="pre-box" id="outIngest"></pre>
         </div>
       </div>
@@ -65,7 +76,7 @@
       <div id="panel-chat" class="panel" role="tabpanel" aria-labelledby="tab-chat" hidden>
         <div class="card">
           <h2>Chat pe documente</h2>
-          <p class="lead">În Chrome poți folosi dictarea; răspunsul poate fi citit cu voce.</p>
+          <p class="lead">În browsere Chromium (Chrome, Brave, Edge) poți folosi dictarea; răspunsul poate fi citit cu voce.</p>
           <textarea id="chatMessage" placeholder="Ex: Ce spune cartea despre eșec?"></textarea>
           <div style="height: 10px"></div>
           <div class="row">
@@ -104,9 +115,11 @@
           <p class="lead">
             Zonă separată de <strong>Google Drive</strong>: încarci PDF-uri scanate de tine, serverul le citește (OCR dacă e nevoie), le
             pune în indexul local, apoi poți <strong>întreba cu vocea</strong> despre <strong>cartea aleasă</strong> din listă și
-            asculta răspunsul. Microfonul și citirea vocală folosesc browserul (Chrome recomandat).
+            asculta răspunsul. Microfonul (dictare) și citirea vocală folosesc <strong>doar browserul</strong> (Chrome, Brave, Edge — Chromium; în Brave, Shields poate bloca transcrierea din cloud).
             <strong>OCR implicit în română</strong> (Tesseract <code>ron</code>); pe macOS, pentru limbi suplimentare: <code>brew install tesseract-lang</code>.
-            API: <code>POST /voice-library/ingest</code>, <code>GET /voice-library/sources</code>, <code>POST /chat</code> cu <code>source</code>.
+            API: <code>POST /voice-library/ingest</code>, <code>POST /voice-library/jobs</code> (asincron + SSE),
+            <code>GET /voice-library/sources</code>, <code>DELETE /voice-library/index?source=…</code>, <code>POST /chat</code> cu
+            <code>source</code>.
           </p>
           <div class="status" id="statusVoiceOcr" style="margin-bottom: 10px"></div>
           <label class="field" for="voiceBookLabel">Denumire pe raft (opțional, pentru listă)</label>
@@ -120,12 +133,23 @@
           </select>
           <div style="height: 10px"></div>
           <input id="voicePdfInput" type="file" accept=".pdf,application/pdf" multiple />
+          <label class="ingest-dry-run"
+            ><input type="checkbox" id="chkVoiceDryRun" /> Simulare (fără OCR / fără scriere în index)</label
+          >
           <div style="height: 10px"></div>
-          <div class="row">
+          <div class="row ingest-actions-row">
             <button class="primary" type="button" id="btnVoiceIngest">Indexează PDF-urile</button>
+            <button type="button" id="btnVoiceIngestCancel" class="ghost" hidden>Anulează</button>
             <button type="button" id="btnVoiceRefreshSources">Reîmprospătează lista de cărți</button>
           </div>
           <div class="status" id="statusVoiceIngest"></div>
+          <div id="voiceIngestProgressWrap" class="ingest-progress-wrap" hidden>
+            <div id="voiceIngestProgressPhase" class="ingest-progress-phase" hidden></div>
+            <div id="voiceIngestProgressTrack" class="ingest-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+              <div id="voiceIngestProgressBar" class="ingest-progress-bar" style="width: 0%"></div>
+            </div>
+            <div id="voiceIngestProgressLabel" class="ingest-progress-label">0%</div>
+          </div>
           <pre class="pre-box" id="outVoiceIngest" style="max-height: 200px"></pre>
         </div>
 
@@ -134,6 +158,12 @@
           <p class="lead">Alege sursa din index (aceeași denumire ca la încărcare). Răspunsul se bazează doar pe fragmentele din acea sursă. La <strong>Întreabă cu vocea</strong>: apare banda albastră, ascultarea e <strong>continuă</strong> (poți face pauze). Când ai terminat, apasă <strong>Stop</strong> sau din nou <strong>microfonul</strong> — se finalizează transcrierea și se trimite întrebarea dacă există text.</p>
           <label class="field" for="voiceSourceSelect">Cartea din bibliotecă</label>
           <select id="voiceSourceSelect"></select>
+          <div class="row" style="margin-top: 10px">
+            <button type="button" id="btnVoiceDeleteFromRag" class="danger">Șterge cartea selectată din index (RAG)</button>
+          </div>
+          <p class="lead" style="margin-top: 8px; font-size: 12px">
+            Șterge doar fragmentele din Chroma pentru sursa aleasă (numele din listă). Fișierul PDF încărcat local nu se șterge.
+          </p>
           <div style="height: 10px"></div>
           <textarea id="voiceQuestionText" placeholder="Scrie întrebarea sau folosește microfonul…"></textarea>
           <div style="height: 10px"></div>
@@ -265,6 +295,6 @@
       </div>
     </div>
 
-    <script src="/static/js/app.js?v=14"></script>
+    <script src="/static/js/app.js?v=36"></script>
   </body>
 </html>

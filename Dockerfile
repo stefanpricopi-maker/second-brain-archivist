@@ -7,7 +7,7 @@
 FROM python:3.12-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgomp1 \
+    && apt-get install -y --no-install-recommends libgomp1 ghostscript qpdf \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

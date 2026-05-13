@@ -23,6 +23,20 @@ def test_health(client: TestClient) -> None:
     assert r.json().get("status") == "ok"
 
 
+def test_root_redirects_to_ui(client: TestClient) -> None:
+    r = client.get("/", follow_redirects=False)
+    assert r.status_code == 302
+    assert r.headers.get("location") == "/static/index.html"
+
+
+def test_meta_json(client: TestClient) -> None:
+    r = client.get("/meta")
+    assert r.status_code == 200
+    j = r.json()
+    assert j.get("service") == "second-brain-archivist"
+    assert j.get("docs") == "/docs"
+
+
 def test_status(client: TestClient) -> None:
     r = client.get("/status")
     assert r.status_code == 200
