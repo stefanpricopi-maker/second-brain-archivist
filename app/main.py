@@ -29,7 +29,7 @@ from app.drive_util import folder_id_from_drive_url
 from app.logging_setup import configure_logging, request_id_ctx
 from app.middleware.http_limits import RateLimitMiddleware, StaticCacheControlMiddleware
 from app.ocr_pdf import ocr_backend_status
-from app.rag import LibraryRAGIndex
+from app.rag import LibraryRAGIndex, query_tokens_for_match
 from openai import (
     APIError,
     APIStatusError,
@@ -224,7 +224,7 @@ def search(q: str, k: int = 8, source: str | None = None) -> dict[str, Any]:
     if k < 1 or k > 24:
         raise HTTPException(status_code=400, detail="k must be 1..24")
     where = _metadata_source_filter(source)
-    chunks = rag.query(q, k=k, where=where)
+    chunks = rag.query_expanded(q, k=k, where=where)
     return {"query": q, "k": k, "source": (source or "").strip() or None, "results": chunks}
 
 
@@ -275,26 +275,7 @@ def _chunk_has_query_overlap(raw: str, q_tokens: list[str]) -> bool:
 
 
 def _query_tokens_for_fallback(query: str) -> list[str]:
-    """Termeni din întrebare pentru potrivire lexicală în modul fără LLM (inclusiv cuvinte scurte utile în RO)."""
-    stop = frozenset(
-        """
-        și sau fie ca la de cu pe în un o unei unul oarecare ce care cum când cât câte câți câteva
-        este sunt era erau fi fost fiind am ai au aș vei vom vor fi eu tu el ea noi voi ei ele
-        a ai ale al lui ei lor să te mă îți îmi ne miți mi vă ne-ți ne-am
-        da nu da nu ok ba deci doar tot foarte mult mai mult mai puțin
-        the and or of to in is are was were be been being
-        """.split()
-    )
-    out: list[str] = []
-    for w in _squish_ws(query).lower().split():
-        w = w.strip(".,?!:;\"'«»()[]{}—–-")
-        if len(w) < 2 or w in stop:
-            continue
-        if w not in out:
-            out.append(w)
-        if len(out) >= 14:
-            break
-    return out
+    return query_tokens_for_match(query)
 
 
 def _pick_excerpt(raw: str, query_tokens: list[str], *, max_chars: int) -> str:
@@ -413,11 +394,37 @@ def _fallback_answer(
     return body
 
 
+def _format_chunk_meta_line(md: dict[str, Any]) -> str:
+    src = md.get("source") or "?"
+    parts = [f"sursă={src}"]
+    if md.get("page") is not None:
+        parts.append(f"pagină={md['page']}")
+    if md.get("chapter") is not None:
+        parts.append(f"capitol={md['chapter']}")
+    bl = md.get("book_label")
+    if isinstance(bl, str) and bl.strip():
+        parts.append(f"raft={bl.strip()}")
+    return ", ".join(parts)
+
+
+def _render_rag_context_for_llm(query: str, chunks: list[dict[str, Any]]) -> str:
+    """Context dens și structurat pentru LLM (delimitatori + excerpt centrat pe întrebare)."""
+    tokens = query_tokens_for_match(query)
+    blocks: list[str] = []
+    for i, ch in enumerate(chunks, start=1):
+        raw = ch.get("text") or ""
+        excerpt = _pick_excerpt(raw, tokens, max_chars=520)
+        meta_line = _format_chunk_meta_line(ch.get("metadata") or {})
+        blocks.append(f'<fragment id="{i}" {meta_line}>\n{excerpt}\n</fragment>')
+    body = "\n\n".join(blocks)
+    return f"<întrebare>\n{query}\n</întrebare>\n\n<fragmente>\n{body}\n</fragmente>" if body else query
+
+
 @app.post("/chat", response_model=ChatResponse, tags=["chat"])
 def chat(req: ChatRequest) -> ChatResponse:
     query = req.message.strip()
     where = _metadata_source_filter(req.source)
-    chunks = rag.query(query, k=req.k, where=where)
+    chunks = rag.query_expanded(query, k=req.k, where=where)
     if LLM_MODE != "openai" or client is None:
         qt = _query_tokens_for_fallback(query)
         ranked = _sort_chunks_for_fallback(chunks, qt)
@@ -426,19 +433,13 @@ def chat(req: ChatRequest) -> ChatResponse:
             used_chunks=_trim_chunks_for_public(ranked),
         )
 
-    rendered = []
-    for i, ch in enumerate(chunks, start=1):
-        md = ch.get("metadata") or {}
-        src = md.get("source", "?")
-        header = f"[{i}] {src}"
-        rendered.append(header + "\n" + (ch.get("text") or ""))
     sf = (req.source or "").strip()
-    prefix = (
+    scope = (
         f"Contextul este restrâns la o singură sursă din bibliotecă (metadata source = «{sf}»).\n\n"
         if sf
         else ""
     )
-    user_block = prefix + (query + "\n\nFragmente:\n" + "\n---\n".join(rendered) if rendered else query)
+    user_block = scope + _render_rag_context_for_llm(query, chunks)
 
     try:
         r = client.chat.completions.create(
